@@ -1,0 +1,12 @@
+.git
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+.DS_Store
+data
+outputs
+tmp
+work
+scripts
+.streamlit/secrets.toml

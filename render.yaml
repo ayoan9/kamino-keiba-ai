@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: kamino-keiba-ai
+    runtime: docker
+    plan: free
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: APP_ACCESS_PASSWORD
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false

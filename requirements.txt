@@ -1,0 +1,13 @@
+streamlit>=1.41,<2
+pandas>=2.2,<3
+openai>=1.58,<3
+Pillow>=10.4,<13
+pypdf>=5,<7
+PyMuPDF>=1.24,<2
+lxml>=5,<7
+pyobjc-core==11.1; platform_system == "Darwin"
+pyobjc-framework-Cocoa==11.1; platform_system == "Darwin"
+pyobjc-framework-CoreML==11.1; platform_system == "Darwin"
+pyobjc-framework-Quartz==11.1; platform_system == "Darwin"
+pyobjc-framework-Vision==11.1; platform_system == "Darwin"
+pytest>=8.3,<9
