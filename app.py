@@ -34,7 +34,7 @@ st.set_page_config(
     page_title="競馬予想AI｜カミノ競馬クラブ",
     page_icon="🏇",
     layout="wide",
-    initial_sidebar_state="auto",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown("""
@@ -138,10 +138,16 @@ st.markdown("""
     .ability-body{grid-template-columns:1fr;}
   }
   @media(max-width:760px){
+    html,body,.stApp{max-width:100vw;overflow-x:hidden;}
     .block-container{padding:.55rem .65rem 5rem;max-width:100%;}
-    [data-testid="stSidebar"]{width:min(88vw,360px)!important;min-width:min(88vw,360px)!important;max-width:min(88vw,360px)!important;}
+    [data-testid="stSidebar"][aria-expanded="false"]{width:0!important;min-width:0!important;max-width:0!important;transform:translateX(-100%)!important;border-right:0!important;overflow:hidden!important;}
+    [data-testid="stSidebar"][aria-expanded="false"]>div{width:0!important;min-width:0!important;max-width:0!important;padding:0!important;overflow:hidden!important;}
+    [data-testid="stSidebar"][aria-expanded="true"]{width:min(88vw,360px)!important;min-width:min(88vw,360px)!important;max-width:min(88vw,360px)!important;box-shadow:8px 0 24px rgba(0,0,0,.22)!important;}
+    [data-testid="stSidebar"]:not([aria-expanded="false"]){width:min(88vw,360px)!important;min-width:min(88vw,360px)!important;max-width:min(88vw,360px)!important;}
     [data-testid="stSidebar"]>div{width:100%!important;}
+    [data-testid="stAppViewContainer"],[data-testid="stMain"],section.main{margin-left:0!important;max-width:100vw!important;}
     [data-testid="stSidebar"] details summary{min-height:48px;display:flex;align-items:center;}
+    [data-testid="collapsedControl"],[data-testid="stSidebarCollapsedControl"]{left:.55rem!important;top:.55rem!important;z-index:999999!important;}
     [data-testid="stSidebarCollapseButton"],[data-testid="stSidebarCollapseButton"] button,[data-testid="stSidebarCollapsedControl"],[data-testid="stSidebarCollapsedControl"] button{min-width:42px!important;min-height:42px!important;}
     .brandbar{align-items:center;min-height:86px;padding:1.05rem 1rem 1.1rem;border-radius:7px 7px 0 0;}
     .brandbar h1{font-size:1.34rem;line-height:1.35}.brandbar p{font-size:.75rem;line-height:1.45}.brand-badge{display:none}
