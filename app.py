@@ -5,6 +5,8 @@ import os
 import html
 import hmac
 import platform
+import re
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -180,7 +182,15 @@ st.markdown("""
 
 
 def init():
-    if "race" not in st.session_state: st.session_state.race = new_state()
+    if "draft_id" not in st.session_state:
+        draft_from_url = _safe_draft_id(st.query_params.get("draft", ""))
+        st.session_state.draft_id = draft_from_url or uuid.uuid4().hex[:12]
+        if st.query_params.get("draft") != st.session_state.draft_id:
+            st.query_params["draft"] = st.session_state.draft_id
+    if "race" not in st.session_state:
+        restored = load_draft(st.session_state.draft_id)
+        st.session_state.race = restored or new_state()
+        st.session_state.draft_restored = bool(restored)
     st.session_state.race.setdefault("bet_plans", {})
     st.session_state.race.setdefault("selected_bet_plan", "AIおすすめ")
     st.session_state.race.setdefault("trend_analysis", {})
@@ -204,6 +214,51 @@ def init():
         st.session_state.api_key_input = os.getenv("OPENAI_API_KEY", "") or secret_key
     if "prediction_policy" not in st.session_state:
         st.session_state.prediction_policy = load_prediction_profile().get("policy", "")
+
+
+DRAFT_ROOT = Path("data/drafts")
+
+
+def _safe_draft_id(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "", str(value or ""))[:64]
+
+
+def draft_path(draft_id: str) -> Path:
+    return DRAFT_ROOT / f"{_safe_draft_id(draft_id)}.json"
+
+
+def load_draft(draft_id: str) -> dict | None:
+    if not draft_id:
+        return None
+    path = draft_path(draft_id)
+    try:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("race"), dict):
+                st.session_state.draft_saved_at = payload.get("saved_at", "")
+                return payload["race"]
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def save_draft(state: dict) -> Path | None:
+    draft_id = _safe_draft_id(st.session_state.get("draft_id", ""))
+    if not draft_id:
+        return None
+    try:
+        DRAFT_ROOT.mkdir(parents=True, exist_ok=True)
+        now = datetime.now().isoformat(timespec="seconds")
+        payload = {"draft_id": draft_id, "saved_at": now, "race": state}
+        path = draft_path(draft_id)
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        os.replace(temp, path)
+        st.session_state.draft_saved_at = now
+        return path
+    except Exception as exc:
+        st.session_state.draft_save_error = str(exc)
+        return None
 
 
 def require_shared_access():
@@ -362,8 +417,22 @@ with st.sidebar:
     st.divider()
     st.markdown("**レース操作**")
     if st.button("＋ 新しいレース", width="stretch"):
-        st.session_state.race = new_state(); st.rerun()
+        st.session_state.draft_id = uuid.uuid4().hex[:12]
+        st.query_params["draft"] = st.session_state.draft_id
+        st.session_state.race = new_state()
+        st.session_state.draft_restored = False
+        st.rerun()
     with st.expander("データの保存・復元", expanded=False):
+        if st.session_state.get("draft_restored"):
+            st.success("前回の一時保存データを復元しました。", icon=":material/restore:")
+        saved_at = st.session_state.get("draft_saved_at", "")
+        if saved_at:
+            st.caption(f"自動一時保存: {saved_at}")
+        else:
+            st.caption("自動一時保存: 有効")
+        st.caption("ブラウザを閉じても、同じURLを開くと作業途中から再開できます。")
+        if st.session_state.get("draft_save_error"):
+            st.warning(f'一時保存エラー: {st.session_state["draft_save_error"]}')
         uploaded = st.file_uploader("レースJSONを復元", type="json")
         if uploaded and st.button("読み込む", width="stretch"):
             try:
@@ -1049,3 +1118,4 @@ def step6():
 
 [step1, step2, step3, step4, step5, step6][st.session_state.step-1]()
 st.markdown('<div class="maker">競馬予想AI　制作：カミノ競馬クラブ</div>', unsafe_allow_html=True)
+save_draft(race)

@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 data/races/*.json
 data/predictions/*.json
+data/drafts/*.json
 data/layout_profiles.json
 data/prediction_profile.json
 data/history/
