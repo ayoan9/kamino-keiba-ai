@@ -792,32 +792,69 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
         "発走時刻": start_m.group(1) if start_m else "",
     })
 
+    number_centers: dict[int, float] = {}
+    for w in words:
+        text = norm(w[4])
+        if 64 <= w[1] <= 82 and re.fullmatch(r"\d{1,2}", text):
+            number = int(text)
+            if 1 <= number <= 18:
+                number_centers[number] = (w[0] + w[2]) / 2
+    field_size = int(info["頭数"]) if str(info.get("頭数", "")).isdigit() else 0
+    if not field_size and number_centers:
+        field_size = max(number_centers)
+    field_size = max(1, min(18, field_size or 16))
+
+    def column_left(number: int) -> float:
+        if number in number_centers:
+            return number_centers[number] - 14.5
+        return 7 + (field_size-number)*30.24
+
     def column_words(number: int, y0: float, y1: float, rel_x0: float = 0, rel_x1: float = 29):
-        left = 7 + (16-number)*30.24
+        left = column_left(number)
         return [w for w in words if left+rel_x0 <= (w[0]+w[2])/2 < left+rel_x1 and y0 <= w[1] < y1]
 
     def joined(number: int, y0: float, y1: float, rel_x0: float = 0, rel_x1: float = 29):
         ws = column_words(number, y0, y1, rel_x0, rel_x1)
         return "".join(norm(w[4]) for w in sorted(ws, key=lambda w: (w[1], w[0])))
 
-    section_starts = [315.4, 394.6, 473.7, 552.9, 632.0]
+    def joined_by_size(number: int, y0: float, y1: float, rel_x0: float, rel_x1: float, min_height: float | None = None, max_height: float | None = None):
+        ws = []
+        for w in column_words(number, y0, y1, rel_x0, rel_x1):
+            height = w[3] - w[1]
+            if min_height is not None and height < min_height:
+                continue
+            if max_height is not None and height > max_height:
+                continue
+            token = norm(w[4])
+            if token in {"✓", "☆", "--"}:
+                continue
+            ws.append(w)
+        return "".join(norm(w[4]) for w in sorted(ws, key=lambda w: (w[1], w[0])))
+
+    date_rows = sorted(w[1] for w in words if 250 <= w[1] <= 700 and re.search(r"\d{2}/\d{2}", norm(w[4])))
+    clusters: list[list[float]] = []
+    for y in date_rows:
+        if not clusters or abs(y - clusters[-1][-1]) > 12:
+            clusters.append([y])
+        else:
+            clusters[-1].append(y)
+    section_starts = [sum(cluster) / len(cluster) for cluster in clusters[:5]] or [315.4, 394.6, 473.7, 552.9, 632.0]
     style_map = {"逃": "逃げ", "先": "先行", "差": "差し", "追": "追込"}
     horses = []
-    for number in range(1, 17):
-        left = 7 + (16-number)*30.24
-        name = joined(number, 114, 187, 7, 22)
+    for number in range(1, field_size + 1):
+        name = joined_by_size(number, 75, 146, 8, 22, min_height=7.5)
         # PDFの縦3列は左から「母 / 馬名 / 父」。母父はその下の横書き欄。
-        dam = joined(number, 114, 187, -1, 8)
-        sire = joined(number, 114, 186, 22, 30)
-        dam_sire = joined(number, 210, 220)
-        style_char = joined(number, 184, 194, 20, 29)[:1]
-        sex_text = joined(number, 219, 228)
-        weight_text = joined(number, 228, 236)
-        jockey_text = joined(number, 235, 242.7)
-        odds_text = joined(number, 261, 267)
-        pop_text = joined(number, 267, 276)
-        stable_text = joined(number, 277, 286)
-        frame_text = joined(number, 95, 106)
+        dam = joined_by_size(number, 78, 124, 0, 8, max_height=7.4)
+        sire = joined_by_size(number, 78, 124, 24, 30, max_height=7.4)
+        dam_sire = joined(number, 172, 182, 6, 24)
+        style_char = joined(number, 148, 157, 20, 29)[:1]
+        sex_text = joined(number, 183, 190, 0, 15)
+        weight_text = joined(number, 191, 198)
+        jockey_text = joined(number, 198, 205)
+        odds_text = joined(number, 225, 231)
+        pop_text = joined(number, 231, 238)
+        stable_text = joined(number, 241, 248)
+        frame_text = joined(number, 58, 66, 10, 20)
         runs, position_sets = [], []
         for start in section_starts:
             section = column_words(number, start-.5, start+78.5)
