@@ -1,4 +1,4 @@
-from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, analyze_race_trends, archive_prediction, calculate_scores, compare_odds, delete_local_api_key, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
+from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, analyze_race_trends, archive_prediction, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
 from horse_ai.historical import _available_month_tokens, _day_races, _result_detail, aggregate_history
 from horse_ai.jra_fetcher import _anchor_actions, _race_identity, _single_odds, _tables
 
@@ -80,6 +80,59 @@ def test_parse_popular_odds_snapshot_from_compact_tables():
     assert odds["馬単 5-8"] == 28.3
     assert odds["3連複 5-12-14"] == 46.6
     assert odds["3連単 11-12-4"] == 73.1
+
+
+def test_fetch_netkeiba_popular_odds_from_html_tables(monkeypatch):
+    html = """
+    <html><body>
+    <section><h2>単勝・複勝</h2>
+      <table>
+        <tr><th>人気</th><th>枠</th><th>馬番</th><th>馬名</th><th>単勝オッズ</th><th>複勝オッズ</th></tr>
+        <tr><td>1</td><td>3</td><td>5</td><td>イガッチ</td><td>5.9</td><td>2.2 - 2.5</td></tr>
+      </table>
+    </section>
+    <section><h2>馬連・ワイド</h2>
+      <table>
+        <tr><th>人気</th><th>組み合わせ</th><th>オッズ</th><th>ワイド・オッズ</th></tr>
+        <tr><td>1</td><td>5 - 8</td><td>15.3</td><td>9.6 - 10.1</td></tr>
+      </table>
+    </section>
+    <section><h2>馬単</h2>
+      <table>
+        <tr><th>人気</th><th>組み合わせ</th><th>オッズ</th></tr>
+        <tr><td>1</td><td>5 > 8</td><td>28.3</td></tr>
+      </table>
+    </section>
+    <section><h2>3連複</h2>
+      <table>
+        <tr><th>人気</th><th>組み合わせ</th><th>オッズ</th></tr>
+        <tr><td>1</td><td>5 - 12 - 14</td><td>46.6</td></tr>
+      </table>
+    </section>
+    <section><h2>3連単</h2>
+      <table>
+        <tr><th>人気</th><th>組み合わせ</th><th>オッズ</th></tr>
+        <tr><td>1</td><td>11 > 12 > 4</td><td>73.1</td></tr>
+      </table>
+    </section>
+    </body></html>
+    """
+
+    class DummyResponse:
+        text = html
+        def raise_for_status(self): return None
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: DummyResponse())
+    odds, transcript = fetch_netkeiba_popular_odds("https://race.netkeiba.com/odds/index.html?race_id=202606280211")
+    assert odds["単勝 5"] == 5.9
+    assert odds["複勝 5"] == 2.35
+    assert odds["馬連 5-8"] == 15.3
+    assert odds["ワイド 5-8"] == 10.1
+    assert odds["馬単 5-8"] == 28.3
+    assert odds["3連複 5-12-14"] == 46.6
+    assert odds["3連単 11-12-4"] == 73.1
+    assert "単勝" in transcript and "3連単" in transcript
 
 
 def test_prediction_archive(tmp_path):

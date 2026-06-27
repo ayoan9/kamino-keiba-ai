@@ -23,7 +23,7 @@ from horse_ai.core import (
     extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
     load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
-    merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
+    fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
     save_layout_profile, save_prediction_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
 )
 from horse_ai.exporter import image_bytes, render_summary
@@ -942,7 +942,25 @@ def step4():
             st.dataframe(pd.DataFrame(schedule_rows), hide_index=True, width="stretch")
     section_label("手動入力（自動取得できない場合）")
     with st.expander("人気上位オッズ表から推定する", expanded=True):
-        st.caption("netkeibaのオッズ一覧などで表示される人気上位表を画像アップロード、またはテキスト貼り付けで読み取ります。表示されている組み合わせは取得値として使い、未表示の買い目は単勝支持率から推定します。")
+        st.caption("おすすめはURL取得です。netkeibaの人気上位オッズ表を直接読み取り、表示されていない買い目は単勝支持率から推定します。画像・テキスト入力は予備手段として使えます。")
+        odds_url = st.text_input(
+            "netkeibaオッズページURL",
+            value=race.get("popular_odds_url", ""),
+            placeholder="https://race.netkeiba.com/odds/index.html?race_id=...",
+            help="頻繁に自動巡回せず、このボタンを押した時だけ取得します。ページ形式やアクセス制限により取得できない場合があります。",
+        )
+        race["popular_odds_url"] = odds_url
+        if st.button("URLから人気上位オッズを取得", icon=":material/link:"):
+            try:
+                parsed, transcript = fetch_netkeiba_popular_odds(odds_url)
+                race["popular_odds_snapshot_text"] = transcript
+                race["popular_odds_image_method"] = "netkeiba URL取得"
+                race["popular_odds_image_parsed"] = parsed
+                persist("netkeibaのURLから人気上位オッズを取得しました")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"URLからオッズを取得できませんでした: {exc}")
+                st.caption("ログインが必要なページ、アクセス制限、ページ形式変更の可能性があります。その場合は画像アップロードかテキスト貼り付けを使ってください。")
         odds_image = st.file_uploader("オッズ表画像をアップロード", type=["png", "jpg", "jpeg", "webp"], key="popular_odds_image")
         ocr_mode = st.radio(
             "画像読み取り方法",
@@ -989,7 +1007,13 @@ def step4():
                     persist("オッズ表画像の読み取り結果を保存しました")
                     st.rerun()
                 except Exception as exc:
-                    st.error(f"画像からオッズを読み取れませんでした: {exc}")
+                    exc_text = str(exc)
+                    if "invalid_api_key" in exc_text or "Incorrect API key" in exc_text or "401" in exc_text:
+                        st.error("OpenAI APIキーが無効です。Renderの環境変数 OPENAI_API_KEY を更新するか、URL取得・無料OCR・手入力で続行してください。")
+                    elif "insufficient_quota" in exc_text or "quota" in exc_text or "429" in exc_text:
+                        st.error("OpenAI APIの利用枠が不足しています。URL取得・無料OCR・手入力で続行するか、OpenAIの請求設定を確認してください。")
+                    else:
+                        st.error(f"画像からオッズを読み取れませんでした: {exc}")
         if image_parsed:
             st.success(f"画像から{len(image_parsed)}件のオッズを読み取り済みです。方式: {race.get('popular_odds_image_method', '画像OCR')}", icon=":material/photo_camera:")
         popular_snapshot = st.text_area(

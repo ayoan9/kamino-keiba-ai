@@ -10,9 +10,11 @@ import subprocess
 import unicodedata
 from copy import deepcopy
 from datetime import datetime
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 SCORE_KEYS = [
     "近走評価", "距離・コース適性", "馬場適性", "展開利", "本命適性",
@@ -1542,6 +1544,123 @@ def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, flo
         raise RuntimeError("固定レイアウトOCRでオッズ数字を読み取れませんでした。画像の表示範囲・倍率を確認してください。")
     notes.append(f"固定レイアウトOCRで{len(result)}件のオッズを読み取り")
     return result, "\n".join(notes)
+
+
+def fetch_netkeiba_popular_odds(url: str, timeout: float = 12.0) -> tuple[dict[str, float], str]:
+    """Fetch visible popular odds tables from a netkeiba odds page URL.
+
+    This is intentionally user-triggered and low-frequency.  If netkeiba changes
+    markup or blocks the request, callers should fall back to manual/screenshot
+    input rather than retrying aggressively.
+    """
+    if not re.match(r"^https://(?:race\.)?netkeiba\.com/", str(url or "")):
+        raise ValueError("netkeibaのレースオッズページURLを入力してください。")
+    import requests
+    from bs4 import BeautifulSoup
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+        "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+    }
+    response = requests.get(url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    html_text = response.text
+    soup = BeautifulSoup(html_text, "html.parser")
+    result: dict[str, float] = {}
+    transcript_parts: list[str] = []
+
+    def previous_heading(table) -> str:
+        texts = []
+        for node in table.find_all_previous(["h1", "h2", "h3", "h4", "caption", "th", "div"], limit=8):
+            text = unicodedata.normalize("NFKC", node.get_text(" ", strip=True))
+            if any(token in text for token in ["単勝", "複勝", "馬連", "ワイド", "馬単", "3連複", "3連単", "三連複", "三連単"]):
+                texts.append(text)
+        parent_text = unicodedata.normalize("NFKC", table.parent.get_text(" ", strip=True) if table.parent else "")
+        texts.append(parent_text[:200])
+        return " ".join(texts)
+
+    def infer_type(heading: str, table_index: int) -> str:
+        if re.search(r"3\s*連\s*単|三\s*連\s*単", heading): return "3連単"
+        if re.search(r"3\s*連\s*複|三\s*連\s*複", heading): return "3連複"
+        if "馬単" in heading: return "馬単"
+        if "馬連" in heading or "ワイド" in heading: return "馬連ワイド"
+        if "単勝" in heading or "複勝" in heading: return "単勝"
+        # netkeiba popular panels commonly appear in this visual order.
+        order = ["単勝", "3連単", "馬連ワイド", "馬単", "3連複"]
+        return order[min(table_index, len(order) - 1)]
+
+    tables = soup.find_all("table")
+    for table_index, table in enumerate(tables):
+        heading = previous_heading(table)
+        kind = infer_type(heading, table_index)
+        try:
+            frames = pd.read_html(StringIO(str(table)))
+        except ValueError:
+            continue
+        for frame in frames:
+            if frame.empty:
+                continue
+            frame.columns = [unicodedata.normalize("NFKC", " ".join(map(str, col)) if isinstance(col, tuple) else str(col)) for col in frame.columns]
+            transcript_parts.append(f"【{kind}】\n" + frame.to_csv(index=False))
+            for _, row in frame.iterrows():
+                values = [unicodedata.normalize("NFKC", str(v)) for v in row.tolist()]
+                line = " ".join(values)
+                nums = re.findall(r"\d+(?:\.\d+)?", line)
+                if not nums:
+                    continue
+                columns_joined = " ".join(frame.columns)
+                if kind == "単勝" or "単勝" in columns_joined:
+                    horse_no = ""
+                    single = None
+                    place = None
+                    for col, value in zip(frame.columns, values):
+                        if "馬番" in col:
+                            found = re.search(r"\d{1,2}", value)
+                            if found: horse_no = found.group()
+                        elif "単勝" in col:
+                            found = re.search(r"\d+(?:\.\d+)?", value)
+                            if found: single = float(found.group())
+                        elif "複勝" in col:
+                            place_nums = [float(v) for v in re.findall(r"\d+(?:\.\d+)?", value)]
+                            if place_nums: place = sum(place_nums[:2]) / min(2, len(place_nums))
+                    if not horse_no and len(nums) >= 3:
+                        horse_no = str(int(float(nums[2])))
+                    if horse_no:
+                        if single is None and len(nums) >= 3:
+                            single = float(nums[-3])
+                        if single is not None:
+                            result[f"単勝 {int(horse_no)}"] = single
+                        if place is not None:
+                            result[f"複勝 {int(horse_no)}"] = round(place, 2)
+                    continue
+                combo_text = ""
+                odds = None
+                for col, value in zip(frame.columns, values):
+                    if "組" in col or "買" in col:
+                        combo_text = value
+                    elif "オッズ" in col and odds is None:
+                        found = re.search(r"\d+(?:\.\d+)?", value)
+                        if found: odds = float(found.group())
+                combo_nums = [str(int(float(v))) for v in re.findall(r"\d{1,2}(?:\.0)?", combo_text or line)]
+                if not odds:
+                    odds = float(nums[-1])
+                if kind == "馬連ワイド" and len(combo_nums) >= 2:
+                    combo = combo_nums[:2]
+                    all_odds = [float(v) for v in nums if float(v) >= 1.0]
+                    if all_odds:
+                        result[_odds_lookup_key("馬連", combo)] = all_odds[-3] if len(all_odds) >= 3 else all_odds[-1]
+                        result[_odds_lookup_key("ワイド", combo)] = all_odds[-1]
+                elif kind in {"馬単", "3連単"}:
+                    need = 2 if kind == "馬単" else 3
+                    if len(combo_nums) >= need:
+                        result[_odds_lookup_key(kind, combo_nums[:need])] = odds
+                elif kind == "3連複" and len(combo_nums) >= 3:
+                    result[_odds_lookup_key("3連複", combo_nums[:3])] = odds
+                elif kind == "枠連" and len(combo_nums) >= 2:
+                    result[_odds_lookup_key("枠連", combo_nums[:2])] = odds
+
+    if not result:
+        raise RuntimeError("netkeibaページから人気上位オッズ表を読み取れませんでした。ログイン状態・ページ形式・アクセス制限を確認してください。")
+    return result, "\n".join(transcript_parts)[:50000]
 
 
 def parse_popular_odds_image_with_openai(data: bytes, mime: str, api_key: str, model: str = "gpt-5.4-mini") -> tuple[dict[str, float], str]:
