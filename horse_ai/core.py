@@ -1375,6 +1375,76 @@ def parse_popular_odds_snapshot(text: str) -> dict[str, float]:
     return result
 
 
+def ocr_text_with_macos_vision(data: bytes) -> str:
+    """Return generic OCR text from an image using macOS Vision."""
+    items, _, _ = _macos_vision_single(data)
+    rows: list[list[dict]] = []
+    for item in sorted(items, key=lambda x: -x["y"]):
+        if not rows or abs(rows[-1][0]["y"] - item["y"]) > 0.012:
+            rows.append([item])
+        else:
+            rows[-1].append(item)
+    lines = []
+    for row in rows:
+        tokens = [item["text"] for item in sorted(row, key=lambda x: x["x"]) if item.get("text")]
+        if tokens:
+            lines.append(" ".join(tokens))
+    return "\n".join(lines)
+
+
+def parse_popular_odds_image_with_openai(data: bytes, mime: str, api_key: str, model: str = "gpt-5.4-mini") -> tuple[dict[str, float], str]:
+    """Read a popular-odds screenshot and return normalized odds keys."""
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+    encoded = base64.b64encode(data).decode("ascii")
+    schema = {
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "bet_type": {"type": "string", "enum": ["単勝", "複勝", "枠連", "馬連", "ワイド", "馬単", "3連複", "3連単"]},
+                        "numbers": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3},
+                        "odds": {"type": "number"},
+                        "source_text": {"type": "string"},
+                    },
+                    "required": ["bet_type", "numbers", "odds", "source_text"],
+                    "additionalProperties": False,
+                },
+            },
+            "transcript": {"type": "string"},
+        },
+        "required": ["rows", "transcript"],
+        "additionalProperties": False,
+    }
+    response = client.responses.create(
+        model=model,
+        input=[{"role": "user", "content": [
+            {"type": "input_text", "text": (
+                "これは競馬のオッズ人気上位表のスクリーンショットです。"
+                "見えている単勝・複勝・馬連・ワイド・馬単・3連複・3連単の組み合わせとオッズを抽出してください。"
+                "馬連/ワイドのように1行に複数券種がある場合は、それぞれ別行として出してください。"
+                "複勝が範囲表示の場合は上下限の平均値をoddsにしてください。"
+                "人気順位はnumbersに含めず、馬番または枠番だけを入れてください。読めない行は出力しないでください。"
+            )},
+            {"type": "input_image", "image_url": f"data:{mime};base64,{encoded}", "detail": "high"},
+        ]}],
+        text={"format": {"type": "json_schema", "name": "popular_odds_image", "strict": True, "schema": schema}},
+        max_output_tokens=8000,
+    )
+    payload = json.loads(response.output_text)
+    result: dict[str, float] = {}
+    for row in payload.get("rows", []):
+        bet_type = str(row.get("bet_type", ""))
+        numbers = [str(int(float(v))) for v in row.get("numbers", []) if re.fullmatch(r"\d+(?:\.\d+)?", str(v))]
+        if not bet_type or not numbers:
+            continue
+        result[_odds_lookup_key(bet_type, numbers)] = float(row["odds"])
+    return result, str(payload.get("transcript", ""))
+
+
 def compare_odds(previous: dict[str, float], current: dict[str, float], min_odds: float) -> tuple[list[dict], list[str]]:
     rows, alerts = [], []
     for key, now in current.items():

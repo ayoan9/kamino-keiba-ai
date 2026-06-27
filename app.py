@@ -22,8 +22,8 @@ from horse_ai.core import (
     extract_media_with_openai, extract_screenshot_with_macos_vision,
     extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
-    load_json, load_layout_profiles, load_prediction_profile, new_state, parse_inputs,
-    merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
+    load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_text_with_macos_vision, parse_inputs,
+    merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
     save_layout_profile, save_prediction_profile, propose_bet_plans,
 )
 from horse_ai.exporter import image_bytes, render_summary
@@ -942,7 +942,31 @@ def step4():
             st.dataframe(pd.DataFrame(schedule_rows), hide_index=True, width="stretch")
     section_label("手動入力（自動取得できない場合）")
     with st.expander("人気上位オッズ表から推定する", expanded=True):
-        st.caption("netkeibaのオッズ一覧などで表示される「単勝・複勝」「馬連・ワイド」「馬単」「3連複」「3連単」の人気上位表をコピーして貼り付けます。表示されている組み合わせは取得値として使い、未表示の買い目は単勝支持率から推定します。")
+        st.caption("netkeibaのオッズ一覧などで表示される人気上位表を画像アップロード、またはテキスト貼り付けで読み取ります。表示されている組み合わせは取得値として使い、未表示の買い目は単勝支持率から推定します。")
+        odds_image = st.file_uploader("オッズ表画像をアップロード", type=["png", "jpg", "jpeg", "webp"], key="popular_odds_image")
+        image_parsed = race.get("popular_odds_image_parsed", {})
+        if odds_image:
+            st.image(odds_image.getvalue(), caption="オッズ表画像", width="stretch")
+            if st.button("画像から人気上位オッズを読み取る", icon=":material/image_search:"):
+                try:
+                    image_bytes_data = odds_image.getvalue()
+                    if IS_MAC:
+                        transcript = ocr_text_with_macos_vision(image_bytes_data)
+                        parsed = parse_popular_odds_snapshot(transcript)
+                        race["popular_odds_snapshot_text"] = transcript
+                    elif api_key:
+                        parsed, transcript = parse_popular_odds_image_with_openai(image_bytes_data, odds_image.type or "image/png", api_key, model)
+                        race["popular_odds_snapshot_text"] = transcript
+                    else:
+                        raise ValueError("公開版で画像から読み取るには、管理者がOPENAI_API_KEYを設定する必要があります。")
+                    race["popular_odds_image_parsed"] = parsed
+                    image_parsed = parsed
+                    persist("オッズ表画像の読み取り結果を保存しました")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"画像からオッズを読み取れませんでした: {exc}")
+        if image_parsed:
+            st.success(f"画像から{len(image_parsed)}件のオッズを読み取り済みです。", icon=":material/photo_camera:")
         popular_snapshot = st.text_area(
             "人気上位表テキスト",
             value=race.get("popular_odds_snapshot_text", ""),
@@ -950,7 +974,7 @@ def step4():
             placeholder="例）\n単勝・複勝\n1 3 5 イガッチ 5.9 2.2 - 2.5\n...\n馬連・ワイド\n1 5 - 8 15.3 9.6 - 10.1\n...\n3連単\n1 11 > 12 > 4 73.1",
         )
         race["popular_odds_snapshot_text"] = popular_snapshot
-        parsed_popular = parse_popular_odds_snapshot(popular_snapshot)
+        parsed_popular = {**image_parsed, **parse_popular_odds_snapshot(popular_snapshot)}
         if parsed_popular:
             st.success(f"{len(parsed_popular)}件の人気上位オッズを読み取りました。", icon=":material/check_circle:")
             preview = pd.DataFrame([{"買い目": key, "オッズ": value} for key, value in sorted(parsed_popular.items())[:20]])
