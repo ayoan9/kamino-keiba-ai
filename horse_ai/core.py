@@ -1432,6 +1432,118 @@ def ocr_popular_odds_image_with_tesseract(data: bytes) -> str:
     return "\n".join(texts)
 
 
+def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, float], str]:
+    """Read netkeiba popular-odds screenshot by fixed cell regions.
+
+    This intentionally avoids Japanese OCR and reads only numeric cells from the
+    popular-odds layout: 単勝・複勝, 馬連・ワイド, 馬単, 3連複, 3連単.
+    It is designed for screenshots with the same proportions as the netkeiba
+    popular odds page; if the layout changes, callers can fall back to generic OCR.
+    """
+    try:
+        import pytesseract
+    except ImportError as exc:
+        raise RuntimeError("Tesseract OCR用のPythonライブラリが未導入です。") from exc
+
+    image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
+    image = ImageOps.autocontrast(image, cutoff=1)
+    width, height = image.size
+
+    def crop_rel(box: tuple[float, float, float, float]) -> Image.Image:
+        x1, y1, x2, y2 = box
+        crop = image.crop((int(width * x1), int(height * y1), int(width * x2), int(height * y2)))
+        if crop.width < 180 or crop.height < 48:
+            scale = max(2, min(5, int(220 / max(1, crop.width)) + 1))
+            crop = crop.resize((crop.width * scale, crop.height * scale), Image.Resampling.LANCZOS)
+        gray = ImageOps.grayscale(crop)
+        gray = ImageOps.autocontrast(gray, cutoff=2)
+        gray = ImageEnhance.Contrast(gray).enhance(1.8)
+        return gray
+
+    def ocr_cell(box: tuple[float, float, float, float], allow_symbols: bool = False) -> str:
+        whitelist = "0123456789.-ー>＞"
+        config = f'--psm 7 -c tessedit_char_whitelist="{whitelist}"'
+        text = pytesseract.image_to_string(crop_rel(box), lang="eng", config=config)
+        text = unicodedata.normalize("NFKC", text).replace("ー", "-").replace("＞", ">")
+        if not allow_symbols:
+            text = re.sub(r"[^0-9.]", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def number_value(text: str) -> float | None:
+        matches = re.findall(r"\d+(?:\.\d+)?", text)
+        if not matches:
+            return None
+        try:
+            return float(matches[-1])
+        except ValueError:
+            return None
+
+    def combo_values(text: str, count: int) -> list[str]:
+        nums = [str(int(float(v))) for v in re.findall(r"\d+(?:\.\d+)?", text)]
+        return nums[:count]
+
+    result: dict[str, float] = {}
+    notes: list[str] = []
+
+    # Relative geometry measured from the netkeiba popular-odds screenshot.
+    # Each table uses top data-row center, row height, and per-cell x ranges.
+    def rows(top_center: float, row_h: float, n: int, cell_h: float = 0.026):
+        for idx in range(n):
+            center = top_center + row_h * idx
+            yield center - cell_h / 2, center + cell_h / 2
+
+    # 単勝・複勝: 15頭分
+    for idx, (y1, y2) in enumerate(rows(0.113, 0.0347, 18), 1):
+        horse = number_value(ocr_cell((0.070, y1, 0.100, y2)))
+        single = number_value(ocr_cell((0.390, y1, 0.442, y2)))
+        place_text = ocr_cell((0.505, y1, 0.592, y2), allow_symbols=True)
+        place_nums = [float(v) for v in re.findall(r"\d+(?:\.\d+)?", place_text)]
+        if horse is not None and 1 <= horse <= 18:
+            no = int(horse)
+            if single is not None:
+                result[f"単勝 {no}"] = single
+            if place_nums:
+                result[f"複勝 {no}"] = round(sum(place_nums[:2]) / min(2, len(place_nums)), 2)
+
+    # 3連単
+    for y1, y2 in rows(0.113, 0.0347, 10):
+        combo = combo_values(ocr_cell((0.690, y1, 0.822, y2), allow_symbols=True), 3)
+        odds = number_value(ocr_cell((0.930, y1, 0.987, y2)))
+        if len(combo) == 3 and odds:
+            result[_odds_lookup_key("3連単", combo)] = odds
+
+    # 馬連・ワイド
+    for y1, y2 in rows(0.754, 0.0347, 10):
+        combo = combo_values(ocr_cell((0.052, y1, 0.128, y2), allow_symbols=True), 2)
+        quinella = number_value(ocr_cell((0.145, y1, 0.190, y2)))
+        wide_text = ocr_cell((0.235, y1, 0.322, y2), allow_symbols=True)
+        wide_nums = [float(v) for v in re.findall(r"\d+(?:\.\d+)?", wide_text)]
+        if len(combo) == 2:
+            if quinella:
+                result[_odds_lookup_key("馬連", combo)] = quinella
+            if wide_nums:
+                result[_odds_lookup_key("ワイド", combo)] = round(sum(wide_nums[:2]) / min(2, len(wide_nums)), 2)
+
+    # 馬単
+    for y1, y2 in rows(0.754, 0.0347, 10):
+        combo = combo_values(ocr_cell((0.390, y1, 0.482, y2), allow_symbols=True), 2)
+        odds = number_value(ocr_cell((0.600, y1, 0.655, y2)))
+        if len(combo) == 2 and odds:
+            result[_odds_lookup_key("馬単", combo)] = odds
+
+    # 3連複
+    for y1, y2 in rows(0.754, 0.0347, 10):
+        combo = combo_values(ocr_cell((0.725, y1, 0.865, y2), allow_symbols=True), 3)
+        odds = number_value(ocr_cell((0.930, y1, 0.987, y2)))
+        if len(combo) == 3 and odds:
+            result[_odds_lookup_key("3連複", combo)] = odds
+
+    if not result:
+        raise RuntimeError("固定レイアウトOCRでオッズ数字を読み取れませんでした。画像の表示範囲・倍率を確認してください。")
+    notes.append(f"固定レイアウトOCRで{len(result)}件のオッズを読み取り")
+    return result, "\n".join(notes)
+
+
 def parse_popular_odds_image_with_openai(data: bytes, mime: str, api_key: str, model: str = "gpt-5.4-mini") -> tuple[dict[str, float], str]:
     """Read a popular-odds screenshot and return normalized odds keys."""
     from openai import OpenAI

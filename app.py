@@ -24,7 +24,7 @@ from horse_ai.core import (
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
     load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
     merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
-    save_layout_profile, save_prediction_profile, propose_bet_plans,
+    save_layout_profile, save_prediction_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
 )
 from horse_ai.exporter import image_bytes, render_summary
 from horse_ai.jra_fetcher import fetch_jra_odds, fetch_jra_result
@@ -946,9 +946,9 @@ def step4():
         odds_image = st.file_uploader("オッズ表画像をアップロード", type=["png", "jpg", "jpeg", "webp"], key="popular_odds_image")
         ocr_mode = st.radio(
             "画像読み取り方法",
-            ["無料OCRを優先", "OpenAI画像解析"],
+            ["固定レイアウトOCR", "無料OCRを優先", "OpenAI画像解析"],
             horizontal=True,
-            help="無料OCRは同じレイアウトのスクリーンショット向きです。読み取りが崩れる場合だけOpenAIを使います。",
+            help="固定レイアウトOCRはnetkeibaの人気上位表スクショ向きです。通常はこちらを使います。",
         )
         image_parsed = race.get("popular_odds_image_parsed", {})
         if odds_image:
@@ -959,7 +959,14 @@ def step4():
                     transcript = ""
                     parsed = {}
                     method = ""
-                    if ocr_mode == "無料OCRを優先":
+                    if ocr_mode == "固定レイアウトOCR":
+                        try:
+                            parsed, transcript = parse_netkeiba_popular_odds_image_layout(image_bytes_data)
+                            method = "固定レイアウトOCR"
+                        except Exception as layout_exc:
+                            st.warning(f"固定レイアウトOCRでは読み取りきれなかったため、無料OCRへ切り替えます: {layout_exc}")
+                            ocr_mode = "無料OCRを優先"
+                    if ocr_mode == "無料OCRを優先" and not parsed:
                         try:
                             transcript = ocr_text_with_macos_vision(image_bytes_data) if IS_MAC else ocr_popular_odds_image_with_tesseract(image_bytes_data)
                             parsed = parse_popular_odds_snapshot(transcript)
