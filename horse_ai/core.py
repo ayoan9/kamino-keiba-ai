@@ -1201,6 +1201,14 @@ def _estimated_odds(bet_type: str, rs: list[dict]) -> float:
     return max(1.1, math.prod(singles) ** powers[bet_type] * discounts[bet_type])
 
 
+def _odds_lookup_key(bet_type: str, nums: list[str]) -> str:
+    unordered = {"枠連", "馬連", "ワイド", "3連複"}
+    normalized = [str(int(float(n))) if re.fullmatch(r"\d+(?:\.0+)?", str(n)) else str(n) for n in nums]
+    if bet_type in unordered:
+        normalized = sorted(normalized, key=lambda x: int(x) if x.isdigit() else x)
+    return f"{bet_type} {'-'.join(normalized)}"
+
+
 def optimize_bets(rows: list[dict], marks: dict, budget: int, unit: int, types: list[str], mode: str, max_bets: int, min_odds: float, odds_map: dict[str, float] | None = None) -> tuple[list[dict], list[dict]]:
     if not rows or budget < unit: return [], []
     odds_map = odds_map or {}
@@ -1211,7 +1219,7 @@ def optimize_bets(rows: list[dict], marks: dict, budget: int, unit: int, types: 
     for bet_type in types:
         numbers = _bet_combinations(rows, marks, bet_type)
         for nums in numbers:
-            key = f"{bet_type} {'-'.join(nums)}"
+            key = _odds_lookup_key(bet_type, nums)
             lookup = by_frame if bet_type == "枠連" else by_no
             if any(n not in lookup for n in nums):
                 continue
@@ -1284,9 +1292,86 @@ def parse_odds(text: str, bet_type: str) -> dict[str, float]:
     result = {}
     for line in text.splitlines():
         nums = re.findall(r"\d+(?:\.\d+)?", line)
-        if bet_type == "単勝" and len(nums) >= 2: result[f"単勝 {int(float(nums[0]))}"] = float(nums[-1])
-        elif bet_type in {"ワイド", "馬連"} and len(nums) >= 3:
-            a, b = int(float(nums[0])), int(float(nums[1])); result[f"{bet_type} {min(a,b)}-{max(a,b)}"] = float(nums[-1])
+        if bet_type in {"単勝", "複勝"} and len(nums) >= 2:
+            result[f"{bet_type} {int(float(nums[0]))}"] = float(nums[-1])
+        elif bet_type in {"枠連", "ワイド", "馬連", "馬単"} and len(nums) >= 3:
+            a, b = int(float(nums[0])), int(float(nums[1]))
+            result[_odds_lookup_key(bet_type, [str(a), str(b)])] = float(nums[-1])
+        elif bet_type in {"3連複", "3連単"} and len(nums) >= 4:
+            a, b, c = int(float(nums[0])), int(float(nums[1])), int(float(nums[2]))
+            result[_odds_lookup_key(bet_type, [str(a), str(b), str(c)])] = float(nums[-1])
+    return result
+
+
+def parse_popular_odds_snapshot(text: str) -> dict[str, float]:
+    """Parse compact netkeiba-style popular odds tables pasted as text.
+
+    The input may contain several sections such as 単勝・複勝, 馬連・ワイド,
+    馬単, 3連複, 3連単.  Only visible popular rows are parsed; missing tickets
+    continue to use model estimates in optimize_bets.
+    """
+    result: dict[str, float] = {}
+    current = ""
+    section_aliases = [
+        ("単勝", re.compile(r"単勝|複勝")),
+        ("3連単", re.compile(r"3\s*連\s*単|三\s*連\s*単")),
+        ("3連複", re.compile(r"3\s*連\s*複|三\s*連\s*複")),
+        ("馬連ワイド", re.compile(r"馬連|ワイド")),
+        ("馬単", re.compile(r"馬単")),
+        ("枠連", re.compile(r"枠連")),
+    ]
+    for raw_line in text.splitlines():
+        line = unicodedata.normalize("NFKC", raw_line).strip()
+        if not line:
+            continue
+        for name, pattern in section_aliases:
+            if pattern.search(line):
+                current = name
+                break
+        numbers = re.findall(r"\d+(?:\.\d+)?", line)
+        if not numbers:
+            continue
+        # 単勝・複勝表: 人気 枠 馬番 ... 単勝 複勝下限 複勝上限 の形を想定。
+        if current == "単勝" and len(numbers) >= 4:
+            horse_no = int(float(numbers[2] if len(numbers) >= 6 else numbers[0]))
+            single = float(numbers[-3])
+            place_low, place_high = float(numbers[-2]), float(numbers[-1])
+            result[f"単勝 {horse_no}"] = single
+            result[f"複勝 {horse_no}"] = round((place_low + place_high) / 2, 2)
+            continue
+        if current in {"馬単", "3連単"}:
+            need = 2 if current == "馬単" else 3
+            pattern = r"(\d{1,2})\s*[>＞]\s*(\d{1,2})" if need == 2 else r"(\d{1,2})\s*[>＞]\s*(\d{1,2})\s*[>＞]\s*(\d{1,2})"
+            match = re.search(pattern, line)
+            if match:
+                combo = [str(int(v)) for v in match.groups()]
+                odds = float(numbers[-1])
+                result[_odds_lookup_key(current, combo)] = odds
+            elif len(numbers) >= need + 1:
+                offset = 1 if len(numbers) >= need + 2 else 0
+                combo = [str(int(float(v))) for v in numbers[offset:offset + need]]
+                odds = float(numbers[-1])
+                result[_odds_lookup_key(current, combo)] = odds
+            continue
+        if current in {"枠連", "馬連ワイド", "3連複"}:
+            need = 2 if current != "3連複" else 3
+            pattern = r"(\d{1,2})\s*[-ー]\s*(\d{1,2})" if need == 2 else r"(\d{1,2})\s*[-ー]\s*(\d{1,2})\s*[-ー]\s*(\d{1,2})"
+            match = re.search(pattern, line)
+            if match:
+                combo = [str(int(v)) for v in match.groups()]
+            elif len(numbers) >= need + 1:
+                offset = 1 if len(numbers) >= need + 2 else 0
+                combo = [str(int(float(v))) for v in numbers[offset:offset + need]]
+            else:
+                continue
+            if len(numbers) >= need + 1:
+                odds = float(numbers[-1])
+                if current == "馬連ワイド":
+                    # 馬連・ワイドの同一行では、先に馬連オッズ、最後にワイド上限が並ぶことが多い。
+                    result[_odds_lookup_key("馬連", combo)] = float(numbers[-3]) if len(numbers) >= need + 4 else odds
+                    result[_odds_lookup_key("ワイド", combo)] = odds
+                else:
+                    result[_odds_lookup_key(current, combo)] = odds
     return result
 
 

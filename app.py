@@ -23,7 +23,7 @@ from horse_ai.core import (
     extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
     load_json, load_layout_profiles, load_prediction_profile, new_state, parse_inputs,
-    merge_web_history, parse_finish_order, parse_odds, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
+    merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
     save_layout_profile, save_prediction_profile, propose_bet_plans,
 )
 from horse_ai.exporter import image_bytes, render_summary
@@ -911,7 +911,7 @@ def step5():
 
 def step4():
     page_head(4, "オッズと直前状態を確認する", "能力評価を固定したまま、最新オッズと状態変化から妙味を確認します。")
-    st.markdown('<div class="guide">評価の軸は固定したまま、オッズ由来の「妙味」だけを見直します。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="guide">評価の軸は固定したまま、オッズ由来の「妙味」だけを見直します。全オッズ入力が難しい場合は、netkeiba等の人気上位表だけでも買い目推定に使えます。</div>', unsafe_allow_html=True)
     with st.expander("JRA公式から指定時刻に自動取得", expanded=True):
         st.caption("JRAへ常時アクセスせず、予約した時刻に1セットだけ取得します。アプリとこの画面を開いたままにしてください。券種ページ間も間隔を空けます。")
         identity = race.get("race_info", {})
@@ -941,19 +941,40 @@ def step4():
             schedule_rows = [{"種類": "オッズ" if item["kind"] == "odds" else "結果", "予定時刻": item["scheduled_at"].replace("T", " "), "状態": status_labels.get(item.get("status"), item.get("status")), "内容": item.get("message", "")} for item in race["jra_fetch_schedule"]]
             st.dataframe(pd.DataFrame(schedule_rows), hide_index=True, width="stretch")
     section_label("手動入力（自動取得できない場合）")
+    with st.expander("人気上位オッズ表から推定する", expanded=True):
+        st.caption("netkeibaのオッズ一覧などで表示される「単勝・複勝」「馬連・ワイド」「馬単」「3連複」「3連単」の人気上位表をコピーして貼り付けます。表示されている組み合わせは取得値として使い、未表示の買い目は単勝支持率から推定します。")
+        popular_snapshot = st.text_area(
+            "人気上位表テキスト",
+            value=race.get("popular_odds_snapshot_text", ""),
+            height=170,
+            placeholder="例）\n単勝・複勝\n1 3 5 イガッチ 5.9 2.2 - 2.5\n...\n馬連・ワイド\n1 5 - 8 15.3 9.6 - 10.1\n...\n3連単\n1 11 > 12 > 4 73.1",
+        )
+        race["popular_odds_snapshot_text"] = popular_snapshot
+        parsed_popular = parse_popular_odds_snapshot(popular_snapshot)
+        if parsed_popular:
+            st.success(f"{len(parsed_popular)}件の人気上位オッズを読み取りました。", icon=":material/check_circle:")
+            preview = pd.DataFrame([{"買い目": key, "オッズ": value} for key, value in sorted(parsed_popular.items())[:20]])
+            st.dataframe(preview, hide_index=True, width="stretch")
+        else:
+            st.caption("貼り付けると、ここに読み取り結果が表示されます。")
     texts = {}
-    odds_tabs = st.tabs(["単勝", "ワイド", "馬連"])
-    for tab, kind in zip(odds_tabs, ["単勝","ワイド","馬連"]):
+    odds_tabs = st.tabs(["単勝", "複勝", "ワイド", "馬連", "馬単", "3連複", "3連単"])
+    for tab, kind in zip(odds_tabs, ["単勝","複勝","ワイド","馬連","馬単","3連複","3連単"]):
         with tab: texts[kind] = st.text_area(f"{kind}オッズ", height=170, placeholder="例: 1 3.2\n2 5.8" if kind=="単勝" else "例: 1-3 4.5", label_visibility="collapsed")
     c1,c2 = st.columns(2)
     with c1: acquired = st.text_input("オッズ取得時刻", datetime.now().strftime("%Y-%m-%d %H:%M"))
     with c2: memo = st.text_input("更新メモ")
     if st.button("オッズを反映", type="primary", icon=":material/refresh:"):
-        current = {}; [current.update(parse_odds(texts[k], k)) for k in texts]
+        current = dict(parsed_popular)
+        [current.update(parse_odds(texts[k], k)) for k in texts]
         previous = race["odds_history"][-1].get("odds", {}) if race["odds_history"] else {}
         comparisons, alerts = compare_odds(previous, current, float(st.session_state.min_odds))
-        race["odds_history"].append({"取得時刻": acquired, "更新メモ": memo, "odds": current, "comparisons": comparisons})
+        race["odds_history"].append({"取得時刻": acquired, "更新メモ": memo, "odds": current, "comparisons": comparisons, "入力種別": "人気上位表＋手動入力" if parsed_popular else "手動入力"})
         race["alerts"] = alerts
+        for horse in race.get("horses", []):
+            key = f'単勝 {horse.get("馬番")}'
+            if key in current:
+                horse["単勝オッズ"] = current[key]
         # 基礎8項目は固定。オッズ由来の妙味だけを穏やかに補正し、買い目・配分を更新。
         for key, now in current.items():
             if key.startswith("単勝 "):
