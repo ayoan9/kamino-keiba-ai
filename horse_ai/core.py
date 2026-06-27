@@ -806,6 +806,15 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
         "発走時刻": start_m.group(1) if start_m else "",
     })
 
+    def label_y(label: str, default: float) -> float:
+        exact = [w for w in words if norm(w[4]) == label]
+        if exact:
+            return min(exact, key=lambda w: abs(w[0] - 505))[1]
+        partial = [w for w in words if label in norm(w[4])]
+        if partial:
+            return min(partial, key=lambda w: abs(w[0] - 505))[1]
+        return default
+
     field_size = int(info["頭数"]) if str(info.get("頭数", "")).isdigit() else 0
 
     number_candidates = [w for w in words if 50 <= w[1] <= 120 and re.fullmatch(r"\d{1,2}", norm(w[4]))]
@@ -892,6 +901,20 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
             clusters[-1].append(y)
     section_starts = [sum(cluster) / len(cluster) for cluster in clusters[:5]] or [315.4, 394.6, 473.7, 552.9, 632.0]
     style_map = {"逃": "逃げ", "先": "先行", "差": "差し", "追": "追込"}
+    label_defaults = {
+        "予想印": number_row_y + 93,
+        "母の父": number_row_y + 105,
+        "性齢": number_row_y + 114,
+        "斤量": number_row_y + 130,
+        "騎手": number_row_y + 135,
+        "オッズ": number_row_y + 159,
+    }
+    y_prediction = label_y("予想印", label_defaults["予想印"])
+    y_dam_sire = label_y("母の父", label_defaults["母の父"])
+    y_sex = label_y("性齢", label_defaults["性齢"])
+    y_weight = label_y("斤量", label_defaults["斤量"])
+    y_jockey = label_y("騎手", label_defaults["騎手"])
+    y_odds = label_y("オッズ", label_defaults["オッズ"])
     horses = []
     for number in range(1, field_size + 1):
         name_y0, name_y1 = number_row_y + 7, number_row_y + 80
@@ -900,14 +923,14 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
         # PDFの縦3列は左から「母 / 馬名 / 父」。母父はその下の横書き欄。
         dam = joined_by_size(number, pedigree_y0, pedigree_y1, 0, 8, max_height=7.4)
         sire = joined_by_size(number, pedigree_y0, pedigree_y1, 24, 30, max_height=7.4)
-        dam_sire = joined(number, 172, 182, 6, 24)
-        style_char = joined(number, 148, 157, 20, 29)[:1]
-        sex_text = joined(number, 183, 190, 0, 15)
-        weight_text = joined(number, 191, 198)
-        jockey_text = joined(number, 198, 205)
-        odds_text = joined(number, 225, 231)
-        pop_text = joined(number, 231, 238)
-        stable_text = joined(number, 241, 248)
+        dam_sire = joined(number, y_dam_sire - 1, y_dam_sire + 8, 6, 24)
+        style_char = (joined(number, y_prediction - 16, y_prediction - 6, 20, 30) or joined(number, y_prediction - 16, y_prediction - 6, 0, 9))[:1]
+        sex_text = joined(number, y_sex - 1, y_sex + 8, 0, 16)
+        weight_text = joined(number, y_weight - 9, y_weight + 1)
+        jockey_text = joined(number, y_jockey - 8, y_jockey + .5)
+        odds_text = joined(number, y_odds - 5, y_odds + 1.5)
+        pop_text = joined(number, y_odds, y_odds + 12)
+        stable_text = joined(number, y_odds + 8, y_odds + 18)
         frame_text = joined(number, number_row_y - 13, number_row_y - 1, 10, 20)
         runs, position_sets = [], []
         for start in section_starts:
@@ -923,7 +946,7 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
         style = explicit_style or inferred_style
         sex_m = re.search(r"[牡牝セ]\d+", sex_text)
         weight_m = re.search(r"\d{2}(?:\.\d)?", weight_text)
-        odds_m = re.search(r"\d+(?:\.\d+)?", odds_text)
+        odds_m = re.search(r"\d{1,3}\.\d", odds_text)
         pop_m = re.search(r"(\d{1,2})人気", pop_text)
         stable = re.sub(r"^(美浦|栗東)", "", stable_text)
         style_source = f"PDF記載:{explicit_style}" if explicit_style else style_reason
