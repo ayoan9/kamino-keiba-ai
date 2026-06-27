@@ -22,7 +22,7 @@ from horse_ai.core import (
     extract_media_with_openai, extract_screenshot_with_macos_vision,
     extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
-    load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_text_with_macos_vision, parse_inputs,
+    load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
     merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
     save_layout_profile, save_prediction_profile, propose_bet_plans,
 )
@@ -944,21 +944,39 @@ def step4():
     with st.expander("人気上位オッズ表から推定する", expanded=True):
         st.caption("netkeibaのオッズ一覧などで表示される人気上位表を画像アップロード、またはテキスト貼り付けで読み取ります。表示されている組み合わせは取得値として使い、未表示の買い目は単勝支持率から推定します。")
         odds_image = st.file_uploader("オッズ表画像をアップロード", type=["png", "jpg", "jpeg", "webp"], key="popular_odds_image")
+        ocr_mode = st.radio(
+            "画像読み取り方法",
+            ["無料OCRを優先", "OpenAI画像解析"],
+            horizontal=True,
+            help="無料OCRは同じレイアウトのスクリーンショット向きです。読み取りが崩れる場合だけOpenAIを使います。",
+        )
         image_parsed = race.get("popular_odds_image_parsed", {})
         if odds_image:
             st.image(odds_image.getvalue(), caption="オッズ表画像", width="stretch")
             if st.button("画像から人気上位オッズを読み取る", icon=":material/image_search:"):
                 try:
                     image_bytes_data = odds_image.getvalue()
-                    if IS_MAC:
-                        transcript = ocr_text_with_macos_vision(image_bytes_data)
-                        parsed = parse_popular_odds_snapshot(transcript)
-                        race["popular_odds_snapshot_text"] = transcript
-                    elif api_key:
+                    transcript = ""
+                    parsed = {}
+                    method = ""
+                    if ocr_mode == "無料OCRを優先":
+                        try:
+                            transcript = ocr_text_with_macos_vision(image_bytes_data) if IS_MAC else ocr_popular_odds_image_with_tesseract(image_bytes_data)
+                            parsed = parse_popular_odds_snapshot(transcript)
+                            method = "Mac標準OCR" if IS_MAC else "Tesseract無料OCR"
+                        except Exception as local_exc:
+                            if not api_key:
+                                raise local_exc
+                            st.warning(f"無料OCRでは読み取りきれなかったため、OpenAI画像解析へ切り替えます: {local_exc}")
+                    if not parsed and api_key:
                         parsed, transcript = parse_popular_odds_image_with_openai(image_bytes_data, odds_image.type or "image/png", api_key, model)
-                        race["popular_odds_snapshot_text"] = transcript
-                    else:
-                        raise ValueError("公開版で画像から読み取るには、管理者がOPENAI_API_KEYを設定する必要があります。")
+                        method = "OpenAI画像解析"
+                    elif ocr_mode == "OpenAI画像解析":
+                        raise ValueError("OpenAI画像解析を使うにはOPENAI_API_KEYが必要です。")
+                    if not parsed:
+                        raise ValueError("画像内のオッズ表を読み取れませんでした。画像の解像度や表示範囲を確認してください。")
+                    race["popular_odds_snapshot_text"] = transcript
+                    race["popular_odds_image_method"] = method or "画像OCR"
                     race["popular_odds_image_parsed"] = parsed
                     image_parsed = parsed
                     persist("オッズ表画像の読み取り結果を保存しました")
@@ -966,7 +984,7 @@ def step4():
                 except Exception as exc:
                     st.error(f"画像からオッズを読み取れませんでした: {exc}")
         if image_parsed:
-            st.success(f"画像から{len(image_parsed)}件のオッズを読み取り済みです。", icon=":material/photo_camera:")
+            st.success(f"画像から{len(image_parsed)}件のオッズを読み取り済みです。方式: {race.get('popular_odds_image_method', '画像OCR')}", icon=":material/photo_camera:")
         popular_snapshot = st.text_area(
             "人気上位表テキスト",
             value=race.get("popular_odds_snapshot_text", ""),

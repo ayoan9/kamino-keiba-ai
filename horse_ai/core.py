@@ -1392,6 +1392,46 @@ def ocr_text_with_macos_vision(data: bytes) -> str:
     return "\n".join(lines)
 
 
+def ocr_popular_odds_image_with_tesseract(data: bytes) -> str:
+    """OCR a fixed-ish popular odds screenshot without paid APIs.
+
+    The full image plus coarse left/right and lower-table crops are OCR'd because
+    netkeiba-style screenshots often contain multiple independent odds tables.
+    """
+    try:
+        import pytesseract
+    except ImportError as exc:
+        raise RuntimeError("Tesseract OCR用のPythonライブラリが未導入です。") from exc
+    image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
+    image = ImageOps.autocontrast(image, cutoff=1)
+    if image.width < 1400:
+        scale = min(2.5, 1400 / max(1, image.width))
+        image = image.resize((int(image.width * scale), int(image.height * scale)), Image.Resampling.LANCZOS)
+    image = ImageEnhance.Contrast(image).enhance(1.25)
+    image = image.filter(ImageFilter.UnsharpMask(radius=1.1, percent=145, threshold=3))
+    crops = [("全体", image)]
+    w, h = image.size
+    boxes = [
+        ("左上", (0, 0, int(w * .62), int(h * .50))),
+        ("右上", (int(w * .58), 0, w, int(h * .50))),
+        ("左下", (0, int(h * .46), int(w * .36), h)),
+        ("中央下", (int(w * .32), int(h * .46), int(w * .68), h)),
+        ("右下", (int(w * .64), int(h * .46), w, h)),
+    ]
+    for name, box in boxes:
+        crop = image.crop(box)
+        if crop.width > 80 and crop.height > 80:
+            crops.append((name, crop))
+    texts = []
+    for name, crop in crops:
+        text = pytesseract.image_to_string(crop, lang="jpn+eng", config="--psm 6")
+        if text.strip():
+            texts.append(f"【{name}】\n{text.strip()}")
+    if not texts:
+        raise RuntimeError("Tesseract OCRで文字を読み取れませんでした。")
+    return "\n".join(texts)
+
+
 def parse_popular_odds_image_with_openai(data: bytes, mime: str, api_key: str, model: str = "gpt-5.4-mini") -> tuple[dict[str, float], str]:
     """Read a popular-odds screenshot and return normalized odds keys."""
     from openai import OpenAI
