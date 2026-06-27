@@ -767,8 +767,20 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
     page = doc.load_page(0)
     words = page.get_text("words")
     full_text = page.get_text("text")
+    raw = page.get_text("rawdict")
 
     def norm(text): return unicodedata.normalize("NFKC", str(text)).strip()
+    char_items = []
+    for block in raw.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                size = float(span.get("size", 0) or 0)
+                for ch in span.get("chars", []):
+                    token = norm(ch.get("c", ""))
+                    if not token:
+                        continue
+                    x0, y0, x1, y1 = ch.get("bbox", (0, 0, 0, 0))
+                    char_items.append({"text": token, "x": (x0 + x1) / 2, "y": y0, "height": y1 - y0, "size": size})
     header_words = [w for w in words if w[1] < 55]
     header_text = " ".join(norm(w[4]) for w in sorted(header_words, key=lambda w: (w[1], w[0])))
     date_m = re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})日", header_text)
@@ -794,14 +806,36 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
         "発走時刻": start_m.group(1) if start_m else "",
     })
 
+    field_size = int(info["頭数"]) if str(info.get("頭数", "")).isdigit() else 0
+
+    number_candidates = [w for w in words if 50 <= w[1] <= 120 and re.fullmatch(r"\d{1,2}", norm(w[4]))]
+    number_rows: list[list] = []
+    for w in sorted(number_candidates, key=lambda item: item[1]):
+        if not number_rows or abs(w[1] - number_rows[-1][-1][1]) > 4:
+            number_rows.append([w])
+        else:
+            number_rows[-1].append(w)
+    best_number_row: list | None = None
+    best_score = (-1, -1, -1.0)
+    for row in number_rows:
+        nums = [int(norm(w[4])) for w in row if 1 <= int(norm(w[4])) <= 18]
+        if not nums:
+            continue
+        expected_max = field_size or max(nums)
+        coverage = len({n for n in nums if 1 <= n <= expected_max})
+        exact_bonus = 1 if expected_max and set(nums) >= set(range(1, expected_max + 1)) else 0
+        avg_y = sum(w[1] for w in row) / len(row)
+        score = (exact_bonus, coverage, avg_y)
+        if score > best_score:
+            best_score = score
+            best_number_row = row
     number_centers: dict[int, float] = {}
-    for w in words:
-        text = norm(w[4])
-        if 64 <= w[1] <= 82 and re.fullmatch(r"\d{1,2}", text):
-            number = int(text)
+    if best_number_row:
+        for w in best_number_row:
+            number = int(norm(w[4]))
             if 1 <= number <= 18:
                 number_centers[number] = (w[0] + w[2]) / 2
-    field_size = int(info["頭数"]) if str(info.get("頭数", "")).isdigit() else 0
+    number_row_y = sum(w[1] for w in best_number_row) / len(best_number_row) if best_number_row else 106.0
     if not field_size and number_centers:
         field_size = max(number_centers)
     field_size = max(1, min(18, field_size or 16))
@@ -814,6 +848,10 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
     def column_words(number: int, y0: float, y1: float, rel_x0: float = 0, rel_x1: float = 29):
         left = column_left(number)
         return [w for w in words if left+rel_x0 <= (w[0]+w[2])/2 < left+rel_x1 and y0 <= w[1] < y1]
+
+    def column_chars(number: int, y0: float, y1: float, rel_x0: float = 0, rel_x1: float = 29):
+        left = column_left(number)
+        return [c for c in char_items if left+rel_x0 <= c["x"] < left+rel_x1 and y0 <= c["y"] < y1]
 
     def joined(number: int, y0: float, y1: float, rel_x0: float = 0, rel_x1: float = 29):
         ws = column_words(number, y0, y1, rel_x0, rel_x1)
@@ -833,6 +871,18 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
             ws.append(w)
         return "".join(norm(w[4]) for w in sorted(ws, key=lambda w: (w[1], w[0])))
 
+    def joined_chars_by_size(number: int, y0: float, y1: float, rel_x0: float, rel_x1: float, min_height: float | None = None, max_height: float | None = None):
+        chars = []
+        for ch in column_chars(number, y0, y1, rel_x0, rel_x1):
+            if min_height is not None and ch["height"] < min_height:
+                continue
+            if max_height is not None and ch["height"] > max_height:
+                continue
+            if ch["text"] in {"✓", "☆", "--"}:
+                continue
+            chars.append(ch)
+        return "".join(ch["text"] for ch in sorted(chars, key=lambda c: (c["y"], c["x"])))
+
     date_rows = sorted(w[1] for w in words if 250 <= w[1] <= 700 and re.search(r"\d{2}/\d{2}", norm(w[4])))
     clusters: list[list[float]] = []
     for y in date_rows:
@@ -844,10 +894,12 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
     style_map = {"逃": "逃げ", "先": "先行", "差": "差し", "追": "追込"}
     horses = []
     for number in range(1, field_size + 1):
-        name = joined_by_size(number, 75, 146, 8, 22, min_height=7.5)
+        name_y0, name_y1 = number_row_y + 7, number_row_y + 80
+        pedigree_y0, pedigree_y1 = number_row_y + 8, number_row_y + 50
+        name = joined_chars_by_size(number, name_y0, name_y1, 8, 22, min_height=7.5) or joined_by_size(number, name_y0, name_y1, 8, 22, min_height=7.5)
         # PDFの縦3列は左から「母 / 馬名 / 父」。母父はその下の横書き欄。
-        dam = joined_by_size(number, 78, 124, 0, 8, max_height=7.4)
-        sire = joined_by_size(number, 78, 124, 24, 30, max_height=7.4)
+        dam = joined_by_size(number, pedigree_y0, pedigree_y1, 0, 8, max_height=7.4)
+        sire = joined_by_size(number, pedigree_y0, pedigree_y1, 24, 30, max_height=7.4)
         dam_sire = joined(number, 172, 182, 6, 24)
         style_char = joined(number, 148, 157, 20, 29)[:1]
         sex_text = joined(number, 183, 190, 0, 15)
@@ -856,7 +908,7 @@ def extract_netkeiba_newspaper_pdf(data: bytes) -> tuple[dict, list[dict], dict,
         odds_text = joined(number, 225, 231)
         pop_text = joined(number, 231, 238)
         stable_text = joined(number, 241, 248)
-        frame_text = joined(number, 58, 66, 10, 20)
+        frame_text = joined(number, number_row_y - 13, number_row_y - 1, 10, 20)
         runs, position_sets = [], []
         for start in section_starts:
             section = column_words(number, start-.5, start+78.5)
