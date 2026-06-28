@@ -267,10 +267,14 @@ def test_race_result_feedback_is_parsed_and_counted_once(tmp_path):
         "final_scores": scores,
         "score_results": calculate_scores(horses, scores, {key: 1 for key in SCORE_KEYS}),
     }
-    feedback = {"確定着順": "1着 2番\n2着 1番\n3着 3番", "外れた見解": "逃げ馬を軽視", "次回への学び": "展開利を再確認"}
+    feedback = {"確定着順": "1着 2番\n2着 1番\n3着 3番", "外れた見解": "逃げ馬を軽視", "次回への学び": "展開利を再確認", "実購入額": 3000, "実払戻額": 5400}
     first = learn_from_race_result(state, feedback, str(path))
     second = learn_from_race_result(state, feedback, str(path))
     assert first["result_learning"]["reviews"] == second["result_learning"]["reviews"] == 1
+    assert first["result_learning"]["stake_total"] == second["result_learning"]["stake_total"] == 3000
+    assert first["result_learning"]["return_total"] == second["result_learning"]["return_total"] == 5400
+    assert first["result_learning"]["profit_total"] == second["result_learning"]["profit_total"] == 2400
+    assert first["result_learning"]["hit_count"] == second["result_learning"]["hit_count"] == 1
     assert any("展開利" in lesson for lesson in first["result_learning"]["lessons"])
 
 

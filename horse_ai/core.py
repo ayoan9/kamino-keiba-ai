@@ -331,7 +331,18 @@ def evaluate_with_ollama(horses: list[dict], race_info: dict, model: str, predic
 
 def load_prediction_profile(path: str = "data/prediction_profile.json") -> dict:
     profile_path = Path(path)
-    default_result_learning = {"reviews": 0, "winner_rank_total": 0.0, "top3_coverage_total": 0.0, "category_signals": {k: 0.0 for k in SCORE_KEYS}, "lessons": [], "reviewed_races": []}
+    default_result_learning = {
+        "reviews": 0,
+        "winner_rank_total": 0.0,
+        "top3_coverage_total": 0.0,
+        "stake_total": 0,
+        "return_total": 0,
+        "profit_total": 0,
+        "hit_count": 0,
+        "category_signals": {k: 0.0 for k in SCORE_KEYS},
+        "lessons": [],
+        "reviewed_races": [],
+    }
     default = {"policy": "", "adjustments": {k: 0.0 for k in SCORE_KEYS}, "learning_samples": 0, "result_learning": default_result_learning, "updated_at": ""}
     if not profile_path.exists(): return default
     try:
@@ -386,8 +397,15 @@ def prediction_policy_prompt(profile: dict) -> str:
     if reviews:
         avg_rank = float(result_learning.get("winner_rank_total", 0)) / reviews
         avg_coverage = float(result_learning.get("top3_coverage_total", 0)) / reviews * 100
+        stake_total = int(result_learning.get("stake_total", 0) or 0)
+        return_total = int(result_learning.get("return_total", 0) or 0)
+        profit_total = int(result_learning.get("profit_total", 0) or 0)
+        hit_rate = int(result_learning.get("hit_count", 0) or 0) / reviews * 100
+        roi = return_total / stake_total * 100 if stake_total else 0
         effective = sorted(result_learning.get("category_signals", {}).items(), key=lambda item: item[1], reverse=True)[:3]
         sections.append(f"結果振り返り{reviews}レース: 勝ち馬の事前平均順位{avg_rank:.1f}位、予想上位3頭と実際上位3頭の平均一致率{avg_coverage:.0f}%。相対的に結果と関連した評価軸: " + "、".join(k for k, _ in effective))
+        if stake_total:
+            sections.append(f"買い目実績: 投資{stake_total:,}円、払戻{return_total:,}円、収支{profit_total:+,}円、回収率{roi:.0f}%、的中率{hit_rate:.0f}%。買い方の強弱判断の参考にする。")
         lessons = result_learning.get("lessons", [])[-6:]
         if lessons: sections.append("過去の振り返りメモ:\n- " + "\n- ".join(str(x) for x in lessons))
     return "\n".join(sections)
@@ -422,6 +440,13 @@ def learn_from_race_result(state: dict, feedback: dict, path: str = "data/predic
     learning["reviews"] = new_reviews
     learning["winner_rank_total"] = float(learning.get("winner_rank_total", 0)) + winner_rank
     learning["top3_coverage_total"] = float(learning.get("top3_coverage_total", 0)) + top3_coverage
+    stake = int(float(feedback.get("実購入額", 0) or 0))
+    payout = int(float(feedback.get("実払戻額", 0) or 0))
+    learning["stake_total"] = int(learning.get("stake_total", 0) or 0) + stake
+    learning["return_total"] = int(learning.get("return_total", 0) or 0) + payout
+    learning["profit_total"] = int(learning.get("profit_total", 0) or 0) + (payout - stake)
+    if payout > 0:
+        learning["hit_count"] = int(learning.get("hit_count", 0) or 0) + 1
     top3 = set(actual[:3]); final_scores = state.get("final_scores", {})
     for key in SCORE_KEYS:
         all_values = [float(scores.get(key, 3)) for scores in final_scores.values()]

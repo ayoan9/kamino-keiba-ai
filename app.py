@@ -453,6 +453,86 @@ with st.sidebar:
         else:
             st.caption("保存された予想はまだありません。手順6で選択して保存できます。")
         st.caption("共有版では表示を軽くするため、一覧は最新50件までです。")
+    with st.expander("実績・AI学習", expanded=False):
+        stored_profile_for_results = load_prediction_profile()
+        learned = stored_profile_for_results.get("result_learning", {})
+        review_count = int(learned.get("reviews", 0) or 0)
+        stake_total = int(learned.get("stake_total", 0) or 0)
+        return_total = int(learned.get("return_total", 0) or 0)
+        profit_total = int(learned.get("profit_total", 0) or 0)
+        roi = return_total / stake_total * 100 if stake_total else 0
+        st.caption("保存済み予想に結果・購入額・払戻を登録すると、次回以降のAI仮評価へ集計情報として反映します。")
+        m1, m2 = st.columns(2)
+        m1.metric("学習済み", f"{review_count}R")
+        m2.metric("回収率", f"{roi:.0f}%" if stake_total else "-")
+        if stake_total:
+            st.caption(f"累計 投資{stake_total:,}円 / 払戻{return_total:,}円 / 収支{profit_total:+,}円")
+        if saved_predictions:
+            learn_target = st.selectbox(
+                "結果を登録する予想",
+                [item["path"] for item in saved_predictions],
+                format_func=lambda p: next(f"{x['title']}  {x['saved_at']}" for x in saved_predictions if x["path"] == p),
+                key="learning_target_prediction",
+            )
+            try:
+                target_state = load_json(learn_target)
+            except Exception:
+                target_state = {}
+                st.warning("選択した予想を読み込めませんでした。")
+            target_feedback = target_state.get("result_feedback", {}) if isinstance(target_state, dict) else {}
+            result_order_sidebar = st.text_area(
+                "確定着順",
+                value=target_feedback.get("確定着順", ""),
+                height=90,
+                placeholder="例）1着 7番\n2着 8番\n3着 6番",
+                key="sidebar_result_order",
+            )
+            default_spend_sidebar = int(target_feedback.get("実購入額", sum(int(b.get("推奨購入金額", 0)) for b in target_state.get("bets", []))) if isinstance(target_state, dict) else 0)
+            spend_sidebar = st.number_input("実購入額", min_value=0, step=100, value=default_spend_sidebar, key="sidebar_actual_spend")
+            return_sidebar = st.number_input("実払戻額", min_value=0, step=100, value=int(target_feedback.get("実払戻額", 0)), key="sidebar_actual_return")
+            lesson_sidebar = st.text_area("振り返り・次回への学び", value=target_feedback.get("次回への学び", ""), height=90, key="sidebar_learning_lesson")
+            missed_sidebar = st.text_area("外れた見解", value=target_feedback.get("外れた見解", ""), height=80, key="sidebar_missed_view")
+            if st.button("この結果を蓄積する", type="primary", width="stretch", icon=":material/model_training:"):
+                try:
+                    actual_numbers = parse_finish_order(result_order_sidebar)
+                    if not actual_numbers:
+                        raise ValueError("確定着順の馬番を入力してください。")
+                    predicted_numbers = [str(r.get("馬番")) for r in target_state.get("score_results", [])]
+                    feedback = {
+                        **target_feedback,
+                        "確定着順": result_order_sidebar,
+                        "外れた見解": missed_sidebar,
+                        "次回への学び": lesson_sidebar,
+                        "実購入額": int(spend_sidebar),
+                        "実払戻額": int(return_sidebar),
+                        "収支": int(return_sidebar) - int(spend_sidebar),
+                        "登録日時": datetime.now().isoformat(),
+                    }
+                    feedback["勝ち馬の事前順位"] = predicted_numbers.index(actual_numbers[0]) + 1 if actual_numbers and actual_numbers[0] in predicted_numbers else ""
+                    feedback["上位3頭一致率"] = round(len(set(predicted_numbers[:3]) & set(actual_numbers[:3])) / max(1, min(3, len(actual_numbers))), 3) if predicted_numbers else 0
+                    target_state["result_feedback"] = feedback
+                    learned_profile = learn_from_race_result(target_state, feedback)
+                    info = target_state.get("race_info", {})
+                    label = " ".join(str(v) for v in [info.get("日付", ""), info.get("競馬場", ""), info.get("レース名", ""), "実績登録済み"] if v)
+                    archive_prediction(target_state, label)
+                    st.success(f'実績を蓄積しました。累計{learned_profile["result_learning"]["reviews"]}Rを次回評価の参考にします。')
+                except Exception as exc:
+                    st.error(f"実績を蓄積できませんでした: {exc}")
+            if st.button("保存済みの結果付き予想を一括反映", width="stretch", icon=":material/history_edu:"):
+                states = []
+                for item in saved_predictions:
+                    try:
+                        states.append(load_json(item["path"]))
+                    except Exception:
+                        pass
+                learned_profile, report = learn_from_result_history(states)
+                if report["新規反映"]:
+                    st.success(f'{report["新規反映"]}Rを反映しました。累計{report["累計"]}Rです。')
+                else:
+                    st.info("新たに反映できる結果付き予想はありませんでした。")
+                st.caption(f'重複 {report["重複"]}件 / 結果不足 {report["結果不足"]}件')
+        else:
+            st.caption("まず手順6で予想を履歴保存すると、ここから結果を登録できます。")
     with st.expander("自分の予想方針", expanded=False):
         stored_profile = load_prediction_profile()
         st.caption("一度保存すると、以後のAI仮評価で共通利用します。レースごとの入力は不要です。")
