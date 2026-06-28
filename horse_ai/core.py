@@ -343,13 +343,23 @@ def load_prediction_profile(path: str = "data/prediction_profile.json") -> dict:
         "lessons": [],
         "reviewed_races": [],
     }
-    default = {"policy": "", "adjustments": {k: 0.0 for k in SCORE_KEYS}, "learning_samples": 0, "result_learning": default_result_learning, "updated_at": ""}
+    default_betting_journal = {
+        "entries": [],
+        "count": 0,
+        "stake_total": 0,
+        "return_total": 0,
+        "profit_total": 0,
+        "hit_count": 0,
+        "patterns": [],
+    }
+    default = {"policy": "", "adjustments": {k: 0.0 for k in SCORE_KEYS}, "learning_samples": 0, "result_learning": default_result_learning, "betting_journal": default_betting_journal, "updated_at": ""}
     if not profile_path.exists(): return default
     try:
         loaded = json.loads(profile_path.read_text(encoding="utf-8"))
         result_learning = {**default_result_learning, **loaded.get("result_learning", {})}
         result_learning["category_signals"] = {**default_result_learning["category_signals"], **result_learning.get("category_signals", {})}
-        return {**default, **loaded, "adjustments": {**default["adjustments"], **loaded.get("adjustments", {})}, "result_learning": result_learning}
+        betting_journal = {**default_betting_journal, **loaded.get("betting_journal", {})}
+        return {**default, **loaded, "adjustments": {**default["adjustments"], **loaded.get("adjustments", {})}, "result_learning": result_learning, "betting_journal": betting_journal}
     except Exception: return default
 
 
@@ -408,7 +418,71 @@ def prediction_policy_prompt(profile: dict) -> str:
             sections.append(f"買い目実績: 投資{stake_total:,}円、払戻{return_total:,}円、収支{profit_total:+,}円、回収率{roi:.0f}%、的中率{hit_rate:.0f}%。買い方の強弱判断の参考にする。")
         lessons = result_learning.get("lessons", [])[-6:]
         if lessons: sections.append("過去の振り返りメモ:\n- " + "\n- ".join(str(x) for x in lessons))
+    betting_journal = profile.get("betting_journal", {})
+    journal_count = int(betting_journal.get("count", 0) or 0)
+    if journal_count:
+        stake_total = int(betting_journal.get("stake_total", 0) or 0)
+        return_total = int(betting_journal.get("return_total", 0) or 0)
+        profit_total = int(betting_journal.get("profit_total", 0) or 0)
+        hit_rate = int(betting_journal.get("hit_count", 0) or 0) / journal_count * 100
+        roi = return_total / stake_total * 100 if stake_total else 0
+        sections.append(f"外部買い目ノート{journal_count}件: 投資{stake_total:,}円、払戻{return_total:,}円、収支{profit_total:+,}円、回収率{roi:.0f}%、的中率{hit_rate:.0f}%。この買い方実績を、券種選択・点数・妙味判断の参考にする。")
+        patterns = [str(x) for x in betting_journal.get("patterns", [])[-8:] if str(x).strip()]
+        if patterns:
+            sections.append("外部買い目からの学び:\n- " + "\n- ".join(patterns))
     return "\n".join(sections)
+
+
+def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.json") -> dict:
+    """Append an external betting/reflection note and aggregate it for future prompts."""
+    profile = load_prediction_profile(path)
+    journal = profile.setdefault("betting_journal", {})
+    required_text = " ".join(str(entry.get(key, "")).strip() for key in ("買い目", "買った理由", "振り返り", "次回への学び"))
+    if not required_text:
+        raise ValueError("買い目、理由、振り返りのいずれかを入力してください")
+    stake = int(float(entry.get("購入額", 0) or 0))
+    payout = int(float(entry.get("払戻額", 0) or 0))
+    normalized = {
+        "登録日時": entry.get("登録日時") or datetime.now().isoformat(timespec="seconds"),
+        "レース": str(entry.get("レース", "")).strip(),
+        "券種": str(entry.get("券種", "")).strip(),
+        "買い目": str(entry.get("買い目", "")).strip(),
+        "購入額": stake,
+        "払戻額": payout,
+        "収支": payout - stake,
+        "買った理由": str(entry.get("買った理由", "")).strip(),
+        "結果": str(entry.get("結果", "")).strip(),
+        "振り返り": str(entry.get("振り返り", "")).strip(),
+        "次回への学び": str(entry.get("次回への学び", "")).strip(),
+        "情報源": str(entry.get("情報源", "")).strip(),
+    }
+    entries = [item for item in journal.get("entries", []) if isinstance(item, dict)]
+    entries.append(normalized)
+    journal["entries"] = entries[-200:]
+    journal["count"] = int(journal.get("count", 0) or 0) + 1
+    journal["stake_total"] = int(journal.get("stake_total", 0) or 0) + stake
+    journal["return_total"] = int(journal.get("return_total", 0) or 0) + payout
+    journal["profit_total"] = int(journal.get("profit_total", 0) or 0) + (payout - stake)
+    if payout > 0:
+        journal["hit_count"] = int(journal.get("hit_count", 0) or 0) + 1
+    pattern_parts = []
+    if normalized["券種"]:
+        pattern_parts.append(f'券種:{normalized["券種"]}')
+    if normalized["買った理由"]:
+        pattern_parts.append("理由:" + normalized["買った理由"])
+    if normalized["振り返り"]:
+        pattern_parts.append("振り返り:" + normalized["振り返り"])
+    if normalized["次回への学び"]:
+        pattern_parts.append("次回:" + normalized["次回への学び"])
+    if pattern_parts:
+        patterns = [str(x) for x in journal.get("patterns", [])]
+        patterns.append(" / ".join(pattern_parts))
+        journal["patterns"] = patterns[-40:]
+    profile["betting_journal"] = journal
+    profile["updated_at"] = datetime.now().isoformat()
+    profile_path = Path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    return profile
 
 
 def parse_finish_order(text: str) -> list[str]:

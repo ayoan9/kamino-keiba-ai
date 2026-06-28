@@ -16,6 +16,7 @@ import altair as alt
 import streamlit as st
 
 from horse_ai.core import (
+    add_betting_journal_entry,
     HORSE_COLUMNS, PRESETS, SCORE_KEYS, analyze_race_trends, archive_prediction, available_ollama_models, calculate_scores,
     compare_odds, delete_local_api_key, evaluate_with_openai,
     evaluate_with_ollama,
@@ -533,6 +534,65 @@ with st.sidebar:
                 st.caption(f'重複 {report["重複"]}件 / 結果不足 {report["結果不足"]}件')
         else:
             st.caption("まず手順6で予想を履歴保存すると、ここから結果を登録できます。")
+    with st.expander("買い目ノート", expanded=False):
+        journal_profile = load_prediction_profile()
+        journal = journal_profile.get("betting_journal", {})
+        journal_count = int(journal.get("count", 0) or 0)
+        journal_stake = int(journal.get("stake_total", 0) or 0)
+        journal_return = int(journal.get("return_total", 0) or 0)
+        journal_profit = int(journal.get("profit_total", 0) or 0)
+        journal_roi = journal_return / journal_stake * 100 if journal_stake else 0
+        st.caption("netkeiba・IPAT・他ツールで実際に買った買い目もここに記録できます。予想保存がないレースでも、買い方の癖と反省をAIに共有します。")
+        j1, j2 = st.columns(2)
+        j1.metric("記録数", f"{journal_count}件")
+        j2.metric("回収率", f"{journal_roi:.0f}%" if journal_stake else "-")
+        if journal_stake:
+            st.caption(f"累計 投資{journal_stake:,}円 / 払戻{journal_return:,}円 / 収支{journal_profit:+,}円")
+        default_race_label = " ".join(str(v) for v in [race.get("race_info", {}).get("日付", ""), race.get("race_info", {}).get("競馬場", ""), race.get("race_info", {}).get("レース番号", ""), race.get("race_info", {}).get("レース名", "")] if v)
+        note_race = st.text_input("レース", value=default_race_label, placeholder="例）2026-06-28 福島11R ラジオNIKKEI賞", key="bet_note_race")
+        note_source = st.selectbox("情報源", ["netkeiba", "IPAT", "JRA", "他ツール", "手入力"], key="bet_note_source")
+        note_ticket = st.selectbox("券種", ["単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単", "複数券種", "その他"], key="bet_note_ticket")
+        note_bets = st.text_area(
+            "買い目",
+            height=100,
+            placeholder="例）ワイド 5-8 1,000円\n馬連 5-8 500円\n3連複 5-8-14 300円",
+            key="bet_note_bets",
+        )
+        note_money1, note_money2 = st.columns(2)
+        with note_money1:
+            note_stake = st.number_input("購入額", min_value=0, step=100, value=0, key="bet_note_stake")
+        with note_money2:
+            note_return = st.number_input("払戻額", min_value=0, step=100, value=0, key="bet_note_return")
+        note_reason = st.text_area("買った理由", height=90, placeholder="例）本命の信頼度は高いが単勝妙味は薄く、相手穴とのワイドで回収を狙った。", key="bet_note_reason")
+        note_result = st.text_area("結果", height=80, placeholder="例）本命は2着、相手が4着。展開は想定より速かった。", key="bet_note_result")
+        note_review = st.text_area("振り返り", height=90, placeholder="例）相手を人気寄りに寄せすぎた。馬場悪化で差し馬をもう少し拾うべきだった。", key="bet_note_review")
+        note_lesson = st.text_area("次回への学び", height=80, placeholder="例）重馬場の小回りは位置取りと馬場適性を優先し、オッズだけで穴に寄せすぎない。", key="bet_note_lesson")
+        if st.button("買い目ノートをAI学習へ追加", type="primary", width="stretch", icon=":material/edit_note:"):
+            try:
+                learned_profile = add_betting_journal_entry({
+                    "レース": note_race,
+                    "情報源": note_source,
+                    "券種": note_ticket,
+                    "買い目": note_bets,
+                    "購入額": int(note_stake),
+                    "払戻額": int(note_return),
+                    "買った理由": note_reason,
+                    "結果": note_result,
+                    "振り返り": note_review,
+                    "次回への学び": note_lesson,
+                    "登録日時": datetime.now().isoformat(),
+                })
+                count = learned_profile.get("betting_journal", {}).get("count", 0)
+                st.success(f"買い目ノートを追加しました。累計{count}件を次回評価の参考にします。")
+            except Exception as exc:
+                st.error(f"買い目ノートを保存できませんでした: {exc}")
+        recent_entries = [item for item in journal.get("entries", []) if isinstance(item, dict)][-5:]
+        if recent_entries:
+            with st.expander("最近の買い目ノート", expanded=False):
+                for item in reversed(recent_entries):
+                    st.write(f"・{item.get('レース','')} / {item.get('券種','')} / 収支{int(item.get('収支', 0)):+,}円")
+                    if item.get("次回への学び"):
+                        st.caption("次回: " + str(item.get("次回への学び")))
     with st.expander("自分の予想方針", expanded=False):
         stored_profile = load_prediction_profile()
         st.caption("一度保存すると、以後のAI仮評価で共通利用します。レースごとの入力は不要です。")

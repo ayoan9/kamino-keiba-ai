@@ -1,4 +1,4 @@
-from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, analyze_race_trends, archive_prediction, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
+from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entry, analyze_race_trends, archive_prediction, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
 from horse_ai.historical import _available_month_tokens, _day_races, _result_detail, aggregate_history
 from horse_ai.jra_fetcher import _anchor_actions, _race_identity, _single_odds, _tables
 
@@ -276,6 +276,29 @@ def test_race_result_feedback_is_parsed_and_counted_once(tmp_path):
     assert first["result_learning"]["profit_total"] == second["result_learning"]["profit_total"] == 2400
     assert first["result_learning"]["hit_count"] == second["result_learning"]["hit_count"] == 1
     assert any("展開利" in lesson for lesson in first["result_learning"]["lessons"])
+
+
+def test_external_betting_journal_is_added_to_ai_prompt(tmp_path):
+    path = tmp_path / "prediction_profile.json"
+    profile = add_betting_journal_entry({
+        "レース": "福島11R",
+        "情報源": "netkeiba",
+        "券種": "ワイド",
+        "買い目": "5-8 1000円",
+        "購入額": 1000,
+        "払戻額": 3200,
+        "買った理由": "本命信頼も単勝妙味が薄く相手穴へ流した",
+        "振り返り": "相手穴の拾い方は良かった",
+        "次回への学び": "小回り重馬場は位置取りを重視",
+    }, str(path))
+    journal = profile["betting_journal"]
+    assert journal["count"] == 1
+    assert journal["stake_total"] == 1000
+    assert journal["return_total"] == 3200
+    assert journal["profit_total"] == 2200
+    prompt = prediction_policy_prompt(profile)
+    assert "外部買い目ノート1件" in prompt
+    assert "小回り重馬場は位置取りを重視" in prompt
 
 
 def test_result_history_import_skips_incomplete_and_deduplicates(tmp_path):
