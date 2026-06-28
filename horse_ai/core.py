@@ -6,6 +6,7 @@ import os
 import re
 import base64
 import getpass
+import html as html_lib
 import subprocess
 import unicodedata
 from copy import deepcopy
@@ -507,6 +508,152 @@ def add_betting_journal_entries(entries: list[dict], path: str = "data/predictio
             errors.append(f"{index}件目: {exc}")
     journal = profile.get("betting_journal", {})
     return profile, {"取込": imported, "スキップ": skipped, "エラー": errors, "累計": int(journal.get("count", 0) or 0)}
+
+
+BETTING_TICKET_TYPES = ["3連単", "三連単", "3連複", "三連複", "馬単", "馬連", "ワイド", "枠連", "複勝", "単勝"]
+BETTING_TICKET_ALIASES = {"三連単": "3連単", "三連複": "3連複"}
+
+
+def _yen_value(value: Any) -> int:
+    text = str(value or "").replace(",", "").replace("円", "").strip()
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+def _betting_race_label(text: str, fallback: str = "") -> str:
+    line = unicodedata.normalize("NFKC", str(text or "")).strip()
+    date = _find(r"((?:20)?\d{2}[/-]\d{1,2}[/-]\d{1,2}|20\d{2}年\d{1,2}月\d{1,2}日)", line)
+    venue = _find(r"(札幌|函館|福島|新潟|東京|中山|中京|京都|阪神|小倉)", line)
+    race_no = _find(r"(?:^|\D)(\d{1,2})\s*R(?:\D|$)", line) or _find(r"(\d{1,2})\s*レース", line)
+    race_name = _find(r"([^\s,，、/／]*(?:賞|ステークス|S|カップ|C|記念|特別|H|ハンデ)[^\s,，、/／]*)", line)
+    parts = [date, venue, f"{race_no}R" if race_no else "", race_name]
+    label = " ".join(part for part in parts if part)
+    return label or fallback
+
+
+def _combo_from_text(text: str, ticket: str) -> str:
+    line = unicodedata.normalize("NFKC", str(text or ""))
+    need = 3 if ticket in {"3連複", "3連単"} else 2 if ticket not in {"単勝", "複勝"} else 1
+    separators = r"[-ー‐‑‒–—―=>＞→,\s]+"
+    pattern = separators.join([r"(\d{1,2})"] * need)
+    after_ticket = line.split(ticket, 1)[-1] if ticket in line else line
+    match = re.search(pattern, after_ticket)
+    if not match and ticket in {"3連複", "3連単"}:
+        match = re.search(r"(\d{1,2})\s*[>＞→-]\s*(\d{1,2})\s*[>＞→-]\s*(\d{1,2})", line)
+    if not match:
+        return ""
+    sep = ">" if ticket in {"馬単", "3連単"} else "-"
+    return sep.join(str(int(v)) for v in match.groups())
+
+
+def _amounts_from_betting_text(text: str) -> tuple[int, int]:
+    line = unicodedata.normalize("NFKC", str(text or "")).replace(",", "")
+    stake = 0
+    payout = 0
+    stake_match = re.search(r"(?:購入|投票|投資|金額|合計|買付|賭け金)[^\d]{0,8}(\d+)\s*円", line)
+    payout_match = re.search(r"(?:払戻|払戻金|回収|返還)[^\d]{0,8}(\d+)\s*円", line)
+    if stake_match:
+        stake = _yen_value(stake_match.group(1))
+    if payout_match:
+        payout = _yen_value(payout_match.group(1))
+    yen_values = [_yen_value(value) for value in re.findall(r"(\d[\d,]*)\s*円", str(text or ""))]
+    yen_values = [value for value in yen_values if value > 0]
+    if not stake and yen_values:
+        stake = yen_values[0]
+    if not payout and len(yen_values) >= 2:
+        payout = yen_values[-1]
+    return stake, payout
+
+
+def _parse_betting_history_line(line: str, source: str, race_label: str = "") -> dict | None:
+    normalized = unicodedata.normalize("NFKC", str(line or ""))
+    if not normalized.strip():
+        return None
+    ticket_raw = next((ticket for ticket in BETTING_TICKET_TYPES if ticket in normalized), "")
+    if not ticket_raw:
+        return None
+    ticket = BETTING_TICKET_ALIASES.get(ticket_raw, ticket_raw)
+    combo = _combo_from_text(normalized, ticket)
+    if not combo:
+        return None
+    stake, payout = _amounts_from_betting_text(normalized)
+    if stake <= 0 and "円" not in normalized:
+        return None
+    label = _betting_race_label(normalized, race_label)
+    return {
+        "レース": label,
+        "情報源": source or "履歴インポート",
+        "券種": ticket,
+        "買い目": f"{ticket} {combo}",
+        "購入額": stake,
+        "払戻額": payout,
+        "結果": "的中" if payout > 0 else "",
+        "買った理由": "",
+        "振り返り": "",
+        "次回への学び": "",
+        "登録日時": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def parse_betting_history_text(text: str, source: str = "履歴インポート") -> tuple[list[dict], list[str]]:
+    """Extract betting journal candidates from pasted/saved JRA-IPAT/netkeiba history.
+
+    The parser is intentionally forgiving. It reads plain text and HTML tables,
+    then returns editable candidates rather than silently committing them.
+    """
+    raw = str(text or "")
+    notes: list[str] = []
+    rows: list[dict] = []
+    seen: set[tuple] = set()
+
+    def add(row: dict | None):
+        if not row:
+            return
+        key = (row.get("レース", ""), row.get("券種", ""), row.get("買い目", ""), int(row.get("購入額", 0) or 0), int(row.get("払戻額", 0) or 0))
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append(row)
+
+    if not raw.strip():
+        return [], ["入力が空です。"]
+
+    if "<table" in raw.lower():
+        try:
+            for table in pd.read_html(StringIO(raw)):
+                if isinstance(table.columns, pd.MultiIndex):
+                    table.columns = [" ".join(str(x) for x in col if str(x) != "nan").strip() for col in table.columns]
+                for record in table.replace({float("nan"): ""}).to_dict("records"):
+                    row_text = " ".join(str(value) for value in record.values() if str(value).strip() and str(value) != "nan")
+                    add(_parse_betting_history_line(row_text, source))
+            if rows:
+                notes.append(f"HTML表から{len(rows)}件の買い目候補を抽出しました。")
+        except Exception as exc:
+            notes.append(f"HTML表の解析は一部失敗しました: {exc}")
+
+    text_source = raw
+    if "<" in text_source and ">" in text_source:
+        text_source = re.sub(r"<[^>]+>", " ", text_source)
+        text_source = html_lib.unescape(text_source)
+    current_race = ""
+    for raw_line in re.split(r"[\r\n]+", text_source):
+        line = " ".join(unicodedata.normalize("NFKC", raw_line).split())
+        if not line:
+            continue
+        label = _betting_race_label(line, current_race)
+        if label and label != current_race and any(token in line for token in ["R", "レース", "賞", "記念", "S", "ステークス"]):
+            current_race = label
+        add(_parse_betting_history_line(line, source, current_race))
+
+    if not rows:
+        notes.append("買い目候補を抽出できませんでした。履歴ページの表をコピーするか、HTML保存ファイルを読み込ませてください。")
+    else:
+        missing_stake = sum(1 for row in rows if int(row.get("購入額", 0) or 0) <= 0)
+        if missing_stake:
+            notes.append(f"{missing_stake}件は購入額を読み取れませんでした。取込前にプレビューで修正してください。")
+    return rows, notes
 
 
 def betting_journal_entries(path: str = "data/prediction_profile.json", limit: int = 200) -> list[dict]:

@@ -1,4 +1,4 @@
-from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
+from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
 from horse_ai.historical import _available_month_tokens, _day_races, _result_detail, aggregate_history
 from horse_ai.jra_fetcher import _anchor_actions, _race_identity, _single_odds, _tables
 
@@ -333,6 +333,41 @@ def test_external_betting_journal_bulk_import_and_listing(tmp_path):
     assert profile["betting_journal"]["return_total"] == 4500
     entries = betting_journal_entries(str(path))
     assert [entry["レース"] for entry in entries] == ["B", "A"]
+
+
+def test_parse_betting_history_text_from_pasted_rows():
+    text = """
+    2026/06/28 函館 11R 函館記念
+    ワイド 5-8 購入 1,000円 払戻 3,200円
+    馬連 5-14 金額 500円 払戻金 0円
+    3連複 5-8-14 投票 300円
+    """
+    rows, notes = parse_betting_history_text(text, "JRA/IPAT")
+    assert len(rows) == 3
+    assert rows[0]["レース"].startswith("2026/06/28 函館 11R")
+    assert rows[0]["券種"] == "ワイド"
+    assert rows[0]["買い目"] == "ワイド 5-8"
+    assert rows[0]["購入額"] == 1000
+    assert rows[0]["払戻額"] == 3200
+    assert rows[2]["券種"] == "3連複"
+    assert rows[2]["買い目"] == "3連複 5-8-14"
+    assert isinstance(notes, list)
+
+
+def test_parse_betting_history_text_from_html_table():
+    html = """
+    <table>
+      <tr><th>日付</th><th>レース</th><th>券種</th><th>買い目</th><th>購入額</th><th>払戻額</th></tr>
+      <tr><td>2026/06/28</td><td>福島11R ラジオNIKKEI賞</td><td>馬単</td><td>5&gt;8</td><td>1,000円</td><td>4,500円</td></tr>
+    </table>
+    """
+    rows, _ = parse_betting_history_text(html, "netkeiba My収支")
+    assert len(rows) == 1
+    assert rows[0]["情報源"] == "netkeiba My収支"
+    assert rows[0]["券種"] == "馬単"
+    assert rows[0]["買い目"] == "馬単 5>8"
+    assert rows[0]["購入額"] == 1000
+    assert rows[0]["払戻額"] == 4500
 
 
 def test_result_history_import_skips_incomplete_and_deduplicates(tmp_path):

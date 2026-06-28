@@ -13,6 +13,7 @@ from horse_ai.core import (
     add_betting_journal_entry,
     betting_journal_entries,
     load_prediction_profile,
+    parse_betting_history_text,
     prediction_policy_prompt,
     save_prediction_profile,
 )
@@ -117,7 +118,7 @@ m4.metric("的中率", f"{hit_rate:.0f}%" if count else "-")
 
 st.markdown('<div class="hint-card">ここに蓄積した予想ロジック・買い目実績・振り返りは、次回以降のAI仮評価と買い目提案の参考情報になります。まずは予想方針だけでも、CSVで3年分を少しずつ入れてもOKです。</div>', unsafe_allow_html=True)
 
-tabs = st.tabs(["予想ロジック", "1件ずつ登録", "CSVでまとめて取込", "蓄積一覧", "AIに渡す学習内容"])
+tabs = st.tabs(["予想ロジック", "履歴インポート", "1件ずつ登録", "CSVでまとめて取込", "蓄積一覧", "AIに渡す学習内容"])
 
 with tabs[0]:
     st.subheader("自分の予想方針")
@@ -141,6 +142,62 @@ with tabs[0]:
     st.info("過去実績が増えるほど、券種の選び方・点数の広げ方・妙味判断の傾向を買い目提案へ反映しやすくなります。")
 
 with tabs[1]:
+    st.subheader("JRA/IPAT・netkeiba履歴から半自動取込")
+    st.caption("ログイン情報は保存しません。各サイトで投票履歴やMy収支を開き、表をコピーするかHTML保存したファイルを読み込ませてください。")
+    source_kind = st.selectbox("履歴の種類", ["JRA/IPAT", "netkeiba My収支", "他ツール", "自動判定"], key="history_import_source")
+    uploaded_history = st.file_uploader("HTML / TXT / CSVファイルを選択", type=["html", "htm", "txt", "csv"], key="history_import_file")
+    pasted_history = st.text_area(
+        "または履歴ページの表を貼り付け",
+        height=220,
+        placeholder="例）投票履歴やMy収支の表を選択してコピー → ここに貼り付け",
+        key="history_import_text",
+    )
+    history_text = pasted_history
+    if uploaded_history:
+        data = uploaded_history.getvalue()
+        for enc in ("utf-8-sig", "cp932", "utf-8"):
+            try:
+                history_text = data.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+    source_label = {"自動判定": "履歴インポート"}.get(source_kind, source_kind)
+    parsed_rows, parse_notes = parse_betting_history_text(history_text, source_label) if history_text.strip() else ([], [])
+    for note in parse_notes:
+        st.info(note)
+    if parsed_rows:
+        st.write("取込候補プレビュー")
+        st.caption("レース名・購入額・払戻額がズレている場合は、この表で直してから取り込めます。振り返りは空欄のままでも後で追記できます。")
+        candidate_df = pd.DataFrame(parsed_rows)
+        editable_candidates = st.data_editor(
+            candidate_df,
+            hide_index=True,
+            width="stretch",
+            num_rows="dynamic",
+            column_config={
+                "券種": st.column_config.SelectboxColumn(options=["単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単", "その他"]),
+                "購入額": st.column_config.NumberColumn(min_value=0, step=100, format="%d円"),
+                "払戻額": st.column_config.NumberColumn(min_value=0, step=100, format="%d円"),
+            },
+            key="history_import_candidates",
+        )
+        valid_rows = [
+            row for row in editable_candidates.to_dict("records")
+            if str(row.get("買い目", "")).strip() and int(row.get("購入額", 0) or 0) >= 0
+        ]
+        if st.button("この候補を買い目実績に追加", type="primary", disabled=not valid_rows):
+            profile_after, report = add_betting_journal_entries(valid_rows)
+            if report["取込"]:
+                st.success(f'{report["取込"]}件を追加しました。累計{report["累計"]}件です。')
+                st.rerun()
+            else:
+                st.info("追加できる候補がありませんでした。")
+            for message in report["エラー"]:
+                st.warning(message)
+    else:
+        st.info("履歴を貼り付けるか、HTML/TXT/CSVファイルを選択すると候補を表示します。")
+
+with tabs[2]:
     st.subheader("1件ずつ登録")
     c1, c2 = st.columns(2)
     with c1:
@@ -175,7 +232,7 @@ with tabs[1]:
         except Exception as exc:
             st.error(f"追加できませんでした: {exc}")
 
-with tabs[2]:
+with tabs[3]:
     st.subheader("CSVでまとめて取込")
     example = "レース,情報源,券種,買い目,購入額,払戻額,買った理由,結果,振り返り,次回への学び\n2026-06-28 福島11R,netkeiba,ワイド,5-8,1000,3200,本命信頼も単勝妙味薄,的中,相手穴の選び方は良かった,小回り重馬場は位置取り重視"
     st.download_button("CSVテンプレートをダウンロード", example.encode("utf-8-sig"), "betting_journal_template.csv", "text/csv")
@@ -200,7 +257,7 @@ with tabs[2]:
         for message in report["エラー"]:
             st.warning(message)
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("蓄積一覧")
     entries = betting_journal_entries(limit=300)
     if entries:
@@ -216,7 +273,7 @@ with tabs[3]:
     else:
         st.info("まだ買い目実績はありません。")
 
-with tabs[4]:
+with tabs[5]:
     st.subheader("AIに渡す学習内容")
     prompt_text = prediction_policy_prompt(load_prediction_profile())
     if prompt_text.strip():
