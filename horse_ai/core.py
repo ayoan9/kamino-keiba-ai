@@ -438,9 +438,9 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
     """Append an external betting/reflection note and aggregate it for future prompts."""
     profile = load_prediction_profile(path)
     journal = profile.setdefault("betting_journal", {})
-    required_text = " ".join(str(entry.get(key, "")).strip() for key in ("買い目", "買った理由", "振り返り", "次回への学び")).strip()
+    required_text = " ".join(str(entry.get(key, "")).strip() for key in ("出走馬", "買い目", "結果", "買った理由", "振り返り", "次回への学び")).strip()
     if not required_text:
-        raise ValueError("買い目、理由、振り返りのいずれかを入力してください")
+        raise ValueError("出走馬、買い目、結果、振り返りのいずれかを入力してください")
     def yen(value) -> int:
         text = str(value or "").replace(",", "").replace("円", "").strip()
         try:
@@ -449,10 +449,15 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
             return 0
     stake = yen(entry.get("購入額", 0))
     payout = yen(entry.get("払戻額", 0))
+    ticket = str(entry.get("券種", "")).strip()
+    if not ticket:
+        bet_text = unicodedata.normalize("NFKC", str(entry.get("買い目", "")))
+        ticket = next((BETTING_TICKET_ALIASES.get(kind, kind) for kind in BETTING_TICKET_TYPES if kind in bet_text), "")
     normalized = {
         "登録日時": entry.get("登録日時") or datetime.now().isoformat(timespec="seconds"),
         "レース": str(entry.get("レース", "")).strip(),
-        "券種": str(entry.get("券種", "")).strip(),
+        "出走馬": str(entry.get("出走馬", "")).strip(),
+        "券種": ticket,
         "買い目": str(entry.get("買い目", "")).strip(),
         "購入額": stake,
         "払戻額": payout,
@@ -475,6 +480,8 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
     pattern_parts = []
     if normalized["券種"]:
         pattern_parts.append(f'券種:{normalized["券種"]}')
+    if normalized["出走馬"]:
+        pattern_parts.append("出走馬:" + normalized["出走馬"][:160])
     if normalized["買った理由"]:
         pattern_parts.append("理由:" + normalized["買った理由"])
     if normalized["振り返り"]:
@@ -584,6 +591,7 @@ def _parse_betting_history_line(line: str, source: str, race_label: str = "") ->
     label = _betting_race_label(normalized, race_label)
     return {
         "レース": label,
+        "出走馬": "",
         "情報源": source or "履歴インポート",
         "券種": ticket,
         "買い目": f"{ticket} {combo}",

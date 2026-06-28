@@ -320,6 +320,23 @@ def test_external_betting_journal_is_added_to_ai_prompt(tmp_path):
     assert "小回り重馬場は位置取りを重視" in prompt
 
 
+def test_betting_journal_keeps_horses_and_infers_ticket_type(tmp_path):
+    path = tmp_path / "prediction_profile.json"
+    profile = add_betting_journal_entry({
+        "レース": "函館11R",
+        "出走馬": "5 ファイアンクランツ\n8 センツブラッド",
+        "買い目": "ワイド 5-8 1000円",
+        "購入額": 1000,
+        "払戻額": 0,
+        "結果": "不的中",
+        "振り返り": "軸は良かったが相手を広げすぎた",
+    }, str(path))
+    entry = profile["betting_journal"]["entries"][-1]
+    assert entry["出走馬"].startswith("5 ファイアンクランツ")
+    assert entry["券種"] == "ワイド"
+    assert "出走馬:" in profile["betting_journal"]["patterns"][-1]
+
+
 def test_external_betting_journal_bulk_import_and_listing(tmp_path):
     path = tmp_path / "prediction_profile.json"
     profile, report = add_betting_journal_entries([
