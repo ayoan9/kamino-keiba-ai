@@ -1467,16 +1467,68 @@ def optimize_bets(rows: list[dict], marks: dict, budget: int, unit: int, types: 
     return output, skipped
 
 
-def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None) -> dict[str, dict]:
+def _ticket_preferences_from_profile(profile: dict | None) -> list[str]:
+    """Return ticket types that have enough personal-result signal to be useful.
+
+    This intentionally stays conservative: the journal influences the choice of
+    viewpoints, but it does not overwrite race-by-race scoring.
+    """
+    if not isinstance(profile, dict):
+        return []
+    entries = profile.get("betting_journal", {}).get("entries", [])
+    if not isinstance(entries, list):
+        return []
+    def yen(value) -> int:
+        text = str(value or "").replace(",", "").replace("円", "").strip()
+        try:
+            return int(float(text))
+        except ValueError:
+            return 0
+
+    stats: dict[str, dict[str, int]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        ticket = str(entry.get("券種", "") or "").strip()
+        if ticket not in ALL_BET_TYPES:
+            continue
+        stake = yen(entry.get("購入額", 0))
+        payout = yen(entry.get("払戻額", 0))
+        if stake <= 0:
+            continue
+        bucket = stats.setdefault(ticket, {"count": 0, "stake": 0, "payout": 0, "hit": 0})
+        bucket["count"] += 1
+        bucket["stake"] += stake
+        bucket["payout"] += payout
+        if payout > 0:
+            bucket["hit"] += 1
+    ranked: list[tuple[float, str]] = []
+    for ticket, data in stats.items():
+        if data["count"] < 2 or data["stake"] <= 0:
+            continue
+        roi = data["payout"] / data["stake"] * 100
+        hit_rate = data["hit"] / data["count"] * 100
+        profit = data["payout"] - data["stake"]
+        if roi < 85 and profit <= 0:
+            continue
+        score = roi + hit_rate * 0.35 + min(24, data["count"] * 3) + (12 if profit > 0 else 0)
+        ranked.append((score, ticket))
+    return [ticket for _, ticket in sorted(ranked, reverse=True)[:5]]
+
+
+def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None, prediction_profile: dict | None = None) -> dict[str, dict]:
     """Compare all ticket types and return distinct, budget-safe portfolio viewpoints."""
     if not rows or budget < unit:
         return {}
     available_units = max(1, budget // unit)
+    preferred_types = _ticket_preferences_from_profile(prediction_profile)
     settings = {
         "的中重視": (["複勝", "ワイド", "枠連", "馬連", "3連複"], "安定回収", min(available_units, 7)),
         "バランス": (ALL_BET_TYPES, "標準", min(available_units, 9)),
-        "高回収狙い": (["単勝", "馬単", "3連複", "3連単"], "攻め", min(available_units, 10)),
     }
+    if preferred_types:
+        settings["実績反映"] = (preferred_types, "標準", min(available_units, 8))
+    settings["高回収狙い"] = (["単勝", "馬単", "3連複", "3連単"], "攻め", min(available_units, 10))
     plans = {}
     for name, (types, mode, internal_limit) in settings.items():
         bets, skipped = optimize_bets(rows, marks, budget, unit, types, mode, internal_limit, min_odds, odds_map)
@@ -1488,9 +1540,21 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
             "bets": bets, "skipped": skipped,
             "summary": {"点数": len(bets), "的中期待指数": round(avg_hit, 1), "回収期待指数": round(avg_value, 1)},
         }
+        if name == "実績反映":
+            plans[name]["summary"]["実績券種"] = "・".join(preferred_types)
     if plans:
         # 両指数の調和平均が最も高い案を、レースごとのAIおすすめとして提示する。
-        recommended = max(plans, key=lambda name: 2 * plans[name]["summary"]["的中期待指数"] * plans[name]["summary"]["回収期待指数"] / max(1, plans[name]["summary"]["的中期待指数"] + plans[name]["summary"]["回収期待指数"]))
+        def recommendation_score(name: str) -> float:
+            summary = plans[name]["summary"]
+            base = 2 * summary["的中期待指数"] * summary["回収期待指数"] / max(1, summary["的中期待指数"] + summary["回収期待指数"])
+            if preferred_types:
+                overlap = sum(1 for bet in plans[name]["bets"] if bet.get("券種") in preferred_types)
+                base += min(4.0, overlap * 0.65)
+                if name == "実績反映":
+                    base += 1.5
+            return base
+
+        recommended = max(plans, key=recommendation_score)
         plans[recommended]["recommended"] = True
     return plans
 

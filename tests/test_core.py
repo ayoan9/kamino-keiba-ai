@@ -39,6 +39,25 @@ def test_ai_bet_plans_choose_points_and_ticket_types_without_user_limit():
     assert any(bet["券種"] in {"3連複", "3連単"} for bet in plans["高回収狙い"]["bets"])
 
 
+def test_ai_bet_plans_add_personal_results_viewpoint():
+    horses, scores = sample()
+    rows = calculate_scores(horses, scores, {key: 1 for key in SCORE_KEYS})
+    profile = {
+        "betting_journal": {
+            "entries": [
+                {"券種": "ワイド", "購入額": 1000, "払戻額": 3200},
+                {"券種": "ワイド", "購入額": 800, "払戻額": 0},
+                {"券種": "馬連", "購入額": 1000, "払戻額": 2800},
+                {"券種": "馬連", "購入額": 1000, "払戻額": 0},
+            ]
+        }
+    }
+    plans = propose_bet_plans(rows, generate_marks(rows), 5000, 100, 1.1, prediction_profile=profile)
+    assert "実績反映" in plans
+    assert "ワイド" in plans["実績反映"]["summary"]["実績券種"]
+    assert all(bet["券種"] in {"ワイド", "馬連"} for bet in plans["実績反映"]["bets"])
+
+
 def test_race_index_breaks_equal_manual_scores_without_more_input():
     horses = [
         {"馬番": 1, "馬名": "A", "人気": 1, "単勝オッズ": 3.0, "過去走テキスト": "芝1800 1 左A"},

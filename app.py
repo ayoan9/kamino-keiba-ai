@@ -16,7 +16,6 @@ import altair as alt
 import streamlit as st
 
 from horse_ai.core import (
-    add_betting_journal_entry,
     HORSE_COLUMNS, PRESETS, SCORE_KEYS, analyze_race_trends, archive_prediction, available_ollama_models, calculate_scores,
     compare_odds, delete_local_api_key, evaluate_with_openai,
     evaluate_with_ollama,
@@ -25,7 +24,7 @@ from horse_ai.core import (
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
     load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
     fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
-    save_layout_profile, save_prediction_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
+    save_layout_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
 )
 from horse_ai.exporter import image_bytes, render_summary
 from horse_ai.jra_fetcher import fetch_jra_odds, fetch_jra_result
@@ -462,158 +461,6 @@ with st.sidebar:
         else:
             st.caption("保存された予想はまだありません。手順6で選択して保存できます。")
         st.caption("共有版では表示を軽くするため、一覧は最新50件までです。")
-    with st.expander("実績・AI学習", expanded=False):
-        stored_profile_for_results = load_prediction_profile()
-        learned = stored_profile_for_results.get("result_learning", {})
-        review_count = int(learned.get("reviews", 0) or 0)
-        stake_total = int(learned.get("stake_total", 0) or 0)
-        return_total = int(learned.get("return_total", 0) or 0)
-        profit_total = int(learned.get("profit_total", 0) or 0)
-        roi = return_total / stake_total * 100 if stake_total else 0
-        st.caption("保存済み予想に結果・購入額・払戻を登録すると、次回以降のAI仮評価へ集計情報として反映します。")
-        m1, m2 = st.columns(2)
-        m1.metric("学習済み", f"{review_count}R")
-        m2.metric("回収率", f"{roi:.0f}%" if stake_total else "-")
-        if stake_total:
-            st.caption(f"累計 投資{stake_total:,}円 / 払戻{return_total:,}円 / 収支{profit_total:+,}円")
-        if saved_predictions:
-            learn_target = st.selectbox(
-                "結果を登録する予想",
-                [item["path"] for item in saved_predictions],
-                format_func=lambda p: next(f"{x['title']}  {x['saved_at']}" for x in saved_predictions if x["path"] == p),
-                key="learning_target_prediction",
-            )
-            try:
-                target_state = load_json(learn_target)
-            except Exception:
-                target_state = {}
-                st.warning("選択した予想を読み込めませんでした。")
-            target_feedback = target_state.get("result_feedback", {}) if isinstance(target_state, dict) else {}
-            result_order_sidebar = st.text_area(
-                "確定着順",
-                value=target_feedback.get("確定着順", ""),
-                height=90,
-                placeholder="例）1着 7番\n2着 8番\n3着 6番",
-                key="sidebar_result_order",
-            )
-            default_spend_sidebar = int(target_feedback.get("実購入額", sum(int(b.get("推奨購入金額", 0)) for b in target_state.get("bets", []))) if isinstance(target_state, dict) else 0)
-            spend_sidebar = st.number_input("実購入額", min_value=0, step=100, value=default_spend_sidebar, key="sidebar_actual_spend")
-            return_sidebar = st.number_input("実払戻額", min_value=0, step=100, value=int(target_feedback.get("実払戻額", 0)), key="sidebar_actual_return")
-            lesson_sidebar = st.text_area("振り返り・次回への学び", value=target_feedback.get("次回への学び", ""), height=90, key="sidebar_learning_lesson")
-            missed_sidebar = st.text_area("外れた見解", value=target_feedback.get("外れた見解", ""), height=80, key="sidebar_missed_view")
-            if st.button("この結果を蓄積する", type="primary", width="stretch", icon=":material/model_training:"):
-                try:
-                    actual_numbers = parse_finish_order(result_order_sidebar)
-                    if not actual_numbers:
-                        raise ValueError("確定着順の馬番を入力してください。")
-                    predicted_numbers = [str(r.get("馬番")) for r in target_state.get("score_results", [])]
-                    feedback = {
-                        **target_feedback,
-                        "確定着順": result_order_sidebar,
-                        "外れた見解": missed_sidebar,
-                        "次回への学び": lesson_sidebar,
-                        "実購入額": int(spend_sidebar),
-                        "実払戻額": int(return_sidebar),
-                        "収支": int(return_sidebar) - int(spend_sidebar),
-                        "登録日時": datetime.now().isoformat(),
-                    }
-                    feedback["勝ち馬の事前順位"] = predicted_numbers.index(actual_numbers[0]) + 1 if actual_numbers and actual_numbers[0] in predicted_numbers else ""
-                    feedback["上位3頭一致率"] = round(len(set(predicted_numbers[:3]) & set(actual_numbers[:3])) / max(1, min(3, len(actual_numbers))), 3) if predicted_numbers else 0
-                    target_state["result_feedback"] = feedback
-                    learned_profile = learn_from_race_result(target_state, feedback)
-                    info = target_state.get("race_info", {})
-                    label = " ".join(str(v) for v in [info.get("日付", ""), info.get("競馬場", ""), info.get("レース名", ""), "実績登録済み"] if v)
-                    archive_prediction(target_state, label)
-                    st.success(f'実績を蓄積しました。累計{learned_profile["result_learning"]["reviews"]}Rを次回評価の参考にします。')
-                except Exception as exc:
-                    st.error(f"実績を蓄積できませんでした: {exc}")
-            if st.button("保存済みの結果付き予想を一括反映", width="stretch", icon=":material/history_edu:"):
-                states = []
-                for item in saved_predictions:
-                    try:
-                        states.append(load_json(item["path"]))
-                    except Exception:
-                        pass
-                learned_profile, report = learn_from_result_history(states)
-                if report["新規反映"]:
-                    st.success(f'{report["新規反映"]}Rを反映しました。累計{report["累計"]}Rです。')
-                else:
-                    st.info("新たに反映できる結果付き予想はありませんでした。")
-                st.caption(f'重複 {report["重複"]}件 / 結果不足 {report["結果不足"]}件')
-        else:
-            st.caption("まず手順6で予想を履歴保存すると、ここから結果を登録できます。")
-    with st.expander("買い目ノート", expanded=False):
-        journal_profile = load_prediction_profile()
-        journal = journal_profile.get("betting_journal", {})
-        journal_count = int(journal.get("count", 0) or 0)
-        journal_stake = int(journal.get("stake_total", 0) or 0)
-        journal_return = int(journal.get("return_total", 0) or 0)
-        journal_profit = int(journal.get("profit_total", 0) or 0)
-        journal_roi = journal_return / journal_stake * 100 if journal_stake else 0
-        st.caption("netkeiba・IPAT・他ツールで実際に買った買い目もここに記録できます。予想保存がないレースでも、買い方の癖と反省をAIに共有します。")
-        j1, j2 = st.columns(2)
-        j1.metric("記録数", f"{journal_count}件")
-        j2.metric("回収率", f"{journal_roi:.0f}%" if journal_stake else "-")
-        if journal_stake:
-            st.caption(f"累計 投資{journal_stake:,}円 / 払戻{journal_return:,}円 / 収支{journal_profit:+,}円")
-        default_race_label = " ".join(str(v) for v in [race.get("race_info", {}).get("日付", ""), race.get("race_info", {}).get("競馬場", ""), race.get("race_info", {}).get("レース番号", ""), race.get("race_info", {}).get("レース名", "")] if v)
-        note_race = st.text_input("レース", value=default_race_label, placeholder="例）2026-06-28 福島11R ラジオNIKKEI賞", key="bet_note_race")
-        note_source = st.selectbox("情報源", ["netkeiba", "IPAT", "JRA", "他ツール", "手入力"], key="bet_note_source")
-        note_ticket = st.selectbox("券種", ["単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単", "複数券種", "その他"], key="bet_note_ticket")
-        note_bets = st.text_area(
-            "買い目",
-            height=100,
-            placeholder="例）ワイド 5-8 1,000円\n馬連 5-8 500円\n3連複 5-8-14 300円",
-            key="bet_note_bets",
-        )
-        note_money1, note_money2 = st.columns(2)
-        with note_money1:
-            note_stake = st.number_input("購入額", min_value=0, step=100, value=0, key="bet_note_stake")
-        with note_money2:
-            note_return = st.number_input("払戻額", min_value=0, step=100, value=0, key="bet_note_return")
-        note_reason = st.text_area("買った理由", height=90, placeholder="例）本命の信頼度は高いが単勝妙味は薄く、相手穴とのワイドで回収を狙った。", key="bet_note_reason")
-        note_result = st.text_area("結果", height=80, placeholder="例）本命は2着、相手が4着。展開は想定より速かった。", key="bet_note_result")
-        note_review = st.text_area("振り返り", height=90, placeholder="例）相手を人気寄りに寄せすぎた。馬場悪化で差し馬をもう少し拾うべきだった。", key="bet_note_review")
-        note_lesson = st.text_area("次回への学び", height=80, placeholder="例）重馬場の小回りは位置取りと馬場適性を優先し、オッズだけで穴に寄せすぎない。", key="bet_note_lesson")
-        if st.button("買い目ノートをAI学習へ追加", type="primary", width="stretch", icon=":material/edit_note:"):
-            try:
-                learned_profile = add_betting_journal_entry({
-                    "レース": note_race,
-                    "情報源": note_source,
-                    "券種": note_ticket,
-                    "買い目": note_bets,
-                    "購入額": int(note_stake),
-                    "払戻額": int(note_return),
-                    "買った理由": note_reason,
-                    "結果": note_result,
-                    "振り返り": note_review,
-                    "次回への学び": note_lesson,
-                    "登録日時": datetime.now().isoformat(),
-                })
-                count = learned_profile.get("betting_journal", {}).get("count", 0)
-                st.success(f"買い目ノートを追加しました。累計{count}件を次回評価の参考にします。")
-            except Exception as exc:
-                st.error(f"買い目ノートを保存できませんでした: {exc}")
-        recent_entries = [item for item in journal.get("entries", []) if isinstance(item, dict)][-5:]
-        if recent_entries:
-            with st.expander("最近の買い目ノート", expanded=False):
-                for item in reversed(recent_entries):
-                    st.write(f"・{item.get('レース','')} / {item.get('券種','')} / 収支{int(item.get('収支', 0)):+,}円")
-                    if item.get("次回への学び"):
-                        st.caption("次回: " + str(item.get("次回への学び")))
-    with st.expander("自分の予想方針", expanded=False):
-        stored_profile = load_prediction_profile()
-        st.caption("一度保存すると、以後のAI仮評価で共通利用します。レースごとの入力は不要です。")
-        prediction_policy = st.text_area(
-            "予想方針",
-            key="prediction_policy",
-            height=170,
-            placeholder="例）近走の着順よりも内容を重視。距離延長で先行できる馬を高評価。過剰人気は妙味を下げる。",
-        )
-        if st.button("予想方針をこのMacに保存", width="stretch"):
-            save_prediction_profile(prediction_policy); st.success("予想方針を保存しました。")
-        if stored_profile.get("learning_samples", 0):
-            st.caption(f'手修正の学習履歴: {stored_profile["learning_samples"]}レース分')
     ollama_models = available_ollama_models()
     with st.expander("AI・詳細設定", expanded=False):
         if ollama_models:
@@ -1005,7 +852,7 @@ def step3():
 
 
 def step5():
-    page_head(5, "AIが買い方を組み立てる", "全8券種を横断し、的中と回収のバランスが異なる3つの買い方を比較します。")
+    page_head(5, "AIが買い方を組み立てる", "全8券種を横断し、的中・回収・蓄積実績の視点から買い方を比較します。")
     if not race["score_results"]: st.warning("先に手順3でスコアを生成してください。"); return
     st.markdown('<div class="guide">券種や点数の指定は不要です。単勝から三連単までを機械的に比較し、予算と最低購入単位から点数を自動で絞ります。</div>', unsafe_allow_html=True)
     with st.container(border=True):
@@ -1015,19 +862,24 @@ def step5():
         with cols[1]: unit = st.number_input("最小購入単位", min_value=100, step=100, key="unit")
         with cols[2]: min_odds = st.number_input("最低買いオッズ", min_value=1.0, step=.1, key="min_odds")
         st.caption("点数は入力しません。100円単位・予算上限・候補の質から自動決定します。")
-    if st.button("全券種を分析して3案を提案", type="primary", icon=":material/psychology:"):
+    if st.button("全券種を分析して買い方を提案", type="primary", icon=":material/psychology:"):
         latest_odds = race["odds_history"][-1].get("odds", {}) if race.get("odds_history") else {}
-        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(budget), int(unit), float(min_odds), latest_odds)
+        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(budget), int(unit), float(min_odds), latest_odds, load_prediction_profile())
         recommended = next((name for name, plan in race["bet_plans"].items() if plan.get("recommended")), "バランス")
         race["selected_bet_plan"] = recommended
         selected = race["bet_plans"].get(recommended, {})
         race["bets"], race["skipped_bets"] = selected.get("bets", []), selected.get("skipped", [])
-        persist("3つの買い方を保存しました")
+        persist("買い方の候補を保存しました")
     if race.get("bet_plans"):
         section_label("AIが比較した買い方")
         plan_names = list(race["bet_plans"])
         plan_cols = st.columns(len(plan_names))
-        descriptions = {"的中重視": "複勝・ワイド中心。まず当てる確率を残す", "バランス": "全券種比較。信頼度と妙味を両立", "高回収狙い": "馬単・三連系中心。振れ幅を許容"}
+        descriptions = {
+            "的中重視": "複勝・ワイド中心。まず当てる確率を残す",
+            "バランス": "全券種比較。信頼度と妙味を両立",
+            "実績反映": "買い目実績ラボで成績が出ている券種を参考",
+            "高回収狙い": "馬単・三連系中心。振れ幅を許容",
+        }
         for col, name in zip(plan_cols, plan_names):
             plan = race["bet_plans"][name]; summary = plan["summary"]
             badge = "AIおすすめ" if plan.get("recommended") else name
@@ -1036,6 +888,8 @@ def step5():
                 st.caption(descriptions.get(name, ""))
                 a,b,c = st.columns(3)
                 a.metric("点数", summary["点数"]); b.metric("的中", summary["的中期待指数"]); c.metric("回収", summary["回収期待指数"])
+                if summary.get("実績券種"):
+                    st.caption(f'参考実績: {summary["実績券種"]}')
         default_plan = race.get("selected_bet_plan") if race.get("selected_bet_plan") in plan_names else plan_names[0]
         selected_name = st.radio("採用する買い方", plan_names, index=plan_names.index(default_plan), horizontal=True)
         selected_plan = race["bet_plans"][selected_name]
@@ -1211,7 +1065,7 @@ def step4():
                     old = race["final_scores"][no]["妙味"]
                     race["final_scores"][no]["妙味"] = max(1, min(5, old + (1 if ratio >= 1.25 else -1 if ratio <= .7 else 0)))
         race["score_results"] = calculate_scores(race["horses"], race["final_scores"], race["weights"])
-        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(st.session_state.budget), int(st.session_state.unit), float(st.session_state.min_odds), current)
+        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(st.session_state.budget), int(st.session_state.unit), float(st.session_state.min_odds), current, load_prediction_profile())
         selected_name = race.get("selected_bet_plan")
         if selected_name not in race["bet_plans"]:
             selected_name = next((name for name, plan in race["bet_plans"].items() if plan.get("recommended")), next(iter(race["bet_plans"]), ""))

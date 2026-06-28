@@ -14,6 +14,7 @@ from horse_ai.core import (
     betting_journal_entries,
     load_prediction_profile,
     prediction_policy_prompt,
+    save_prediction_profile,
 )
 
 
@@ -114,11 +115,32 @@ m2.metric("累計収支", f"{profit:+,}円")
 m3.metric("回収率", f"{roi:.0f}%" if stake else "-")
 m4.metric("的中率", f"{hit_rate:.0f}%" if count else "-")
 
-st.markdown('<div class="hint-card">まずは1件ずつ登録しても、CSVでまとめて取り込んでもOKです。列名は「レース, 情報源, 券種, 買い目, 購入額, 払戻額, 買った理由, 結果, 振り返り, 次回への学び」が基本です。</div>', unsafe_allow_html=True)
+st.markdown('<div class="hint-card">ここに蓄積した予想ロジック・買い目実績・振り返りは、次回以降のAI仮評価と買い目提案の参考情報になります。まずは予想方針だけでも、CSVで3年分を少しずつ入れてもOKです。</div>', unsafe_allow_html=True)
 
-tabs = st.tabs(["1件ずつ登録", "CSVでまとめて取込", "蓄積一覧", "AIに渡す学習内容"])
+tabs = st.tabs(["予想ロジック", "1件ずつ登録", "CSVでまとめて取込", "蓄積一覧", "AIに渡す学習内容"])
 
 with tabs[0]:
+    st.subheader("自分の予想方針")
+    st.caption("日頃の予想軸をここに集約します。レースごとの入力欄ではなく、このラボに保存した内容を共通の判断軸として使います。")
+    policy_text = st.text_area(
+        "予想AIに常に共有したい方針",
+        value=str(profile.get("policy", "") or ""),
+        height=220,
+        placeholder="例）近走の着順より内容を重視。小回りは位置取り、道悪は馬場適性とパワー型を重視。過剰人気は妙味を下げ、軸は崩れにくさを優先する。",
+    )
+    if st.button("予想ロジックを保存", type="primary"):
+        save_prediction_profile(policy_text)
+        st.success("保存しました。次回以降のAI仮評価と買い目提案の参考にします。")
+        st.rerun()
+    learned = profile.get("result_learning", {})
+    st.markdown("#### 現在AIに渡される学習素材")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("手修正履歴", f'{int(profile.get("learning_samples", 0) or 0)}R')
+    c2.metric("結果振り返り", f'{int(learned.get("reviews", 0) or 0)}R')
+    c3.metric("買い目実績", f"{count}件")
+    st.info("過去実績が増えるほど、券種の選び方・点数の広げ方・妙味判断の傾向を買い目提案へ反映しやすくなります。")
+
+with tabs[1]:
     st.subheader("1件ずつ登録")
     c1, c2 = st.columns(2)
     with c1:
@@ -153,7 +175,7 @@ with tabs[0]:
         except Exception as exc:
             st.error(f"追加できませんでした: {exc}")
 
-with tabs[1]:
+with tabs[2]:
     st.subheader("CSVでまとめて取込")
     example = "レース,情報源,券種,買い目,購入額,払戻額,買った理由,結果,振り返り,次回への学び\n2026-06-28 福島11R,netkeiba,ワイド,5-8,1000,3200,本命信頼も単勝妙味薄,的中,相手穴の選び方は良かった,小回り重馬場は位置取り重視"
     st.download_button("CSVテンプレートをダウンロード", example.encode("utf-8-sig"), "betting_journal_template.csv", "text/csv")
@@ -178,7 +200,7 @@ with tabs[1]:
         for message in report["エラー"]:
             st.warning(message)
 
-with tabs[2]:
+with tabs[3]:
     st.subheader("蓄積一覧")
     entries = betting_journal_entries(limit=300)
     if entries:
@@ -192,9 +214,9 @@ with tabs[2]:
             "text/csv",
         )
     else:
-        st.info("まだ買い目ノートはありません。")
+        st.info("まだ買い目実績はありません。")
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("AIに渡す学習内容")
     prompt_text = prediction_policy_prompt(load_prediction_profile())
     if prompt_text.strip():
