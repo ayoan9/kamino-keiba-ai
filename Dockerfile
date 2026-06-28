@@ -12,6 +12,7 @@ RUN apt-get update \
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py ./
 COPY horse_ai ./horse_ai
+COPY pages ./pages
 RUN mkdir -p data/races data/predictions data/drafts outputs && useradd --create-home appuser && chown -R appuser:appuser /app
 
 USER appuser
