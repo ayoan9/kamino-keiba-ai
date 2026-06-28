@@ -71,7 +71,7 @@ st.markdown("""
   .racebar strong{font-size:1.08rem;color:#1e2932}.racebar span{color:#6b7780;font-size:.77rem;font-weight:450}.racebar .race-no{color:white;background:var(--blue);border-radius:3px;padding:.34rem .54rem;font-weight:900;border-bottom:3px solid #04518b;}
   .lab-link {display:flex;align-items:center;justify-content:space-between;gap:.85rem;margin:-.25rem 0 .95rem;padding:.84rem 1rem;border:1px solid #c8d7e6;border-radius:10px;background:linear-gradient(135deg,#f7fbff 0%,#fff 62%);box-shadow:0 3px 10px rgba(25,45,65,.06);}
   .lab-link strong{display:block;color:#12375f;font-size:.98rem}.lab-link span{display:block;color:#65727d;font-size:.78rem;line-height:1.45;margin-top:.12rem}
-  .lab-link a{white-space:nowrap;text-decoration:none;background:#0b78bd;color:white!important;border-radius:999px;padding:.48rem .82rem;font-weight:850;font-size:.82rem;box-shadow:0 3px 8px rgba(11,120,189,.22);}
+  .lab-link-button [data-testid="stPageLink"] a{white-space:nowrap;text-decoration:none;background:#0b78bd;color:white!important;border-radius:999px;padding:.48rem .82rem;font-weight:850;font-size:.82rem;box-shadow:0 3px 8px rgba(11,120,189,.22);display:inline-flex;justify-content:center;}
   .page-head {display:flex;gap:1rem;align-items:center;margin:1.35rem 0 .9rem;}
   .step-kicker {display:grid;place-items:center;min-width:44px;height:44px;border-radius:4px;background:var(--blue);color:white;font-weight:900;font-size:1.1rem;box-shadow:inset 0 -3px 0 #04518b}
   .page-head h2 {margin:0;font-size:1.55rem;color:#182630}.page-head p{margin:.16rem 0 0;color:#6b7780;font-size:.81rem;font-weight:450;line-height:1.5}
@@ -159,7 +159,7 @@ st.markdown("""
     .racebar{flex-wrap:wrap;gap:.45rem .7rem;padding:.72rem .9rem;border-radius:0 0 11px 11px;margin-bottom:.7rem;}
     .racebar strong{font-size:.98rem;max-width:calc(100% - 52px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.racebar span{width:100%;font-size:.73rem}
     .racebar .race-no{padding:.3rem .48rem;font-size:.88rem}
-    .lab-link{align-items:flex-start;flex-direction:column;margin:-.15rem 0 .8rem;padding:.78rem .86rem}.lab-link a{width:100%;text-align:center}
+    .lab-link{align-items:flex-start;flex-direction:column;margin:-.15rem 0 .8rem;padding:.78rem .86rem}.lab-link-button [data-testid="stPageLink"] a{width:100%;text-align:center}
     .page-head{gap:.65rem;margin:1rem 0 .7rem;align-items:flex-start}.step-kicker{min-width:38px;height:38px;border-radius:10px;font-size:1rem}
     .page-head h2{font-size:1.22rem;line-height:1.35}.page-head p{font-size:.75rem;line-height:1.5}
     .guide{padding:.56rem .72rem;font-size:.74rem;line-height:1.55;margin-bottom:.72rem}.section-label{margin:1rem 0 .5rem;font-size:.94rem}
@@ -427,9 +427,9 @@ with st.sidebar:
         st.session_state.draft_restored = False
         st.rerun()
     try:
-        st.page_link("pages/01_買い目実績ラボ.py", label="買い目実績ラボを開く", icon="📝", width="stretch")
+        st.page_link("pages/01_betting_results_lab.py", label="買い目実績ラボを開く", icon="📝", width="stretch")
     except Exception:
-        st.markdown("[📝 買い目実績ラボを開く](./買い目実績ラボ)")
+        st.markdown("[📝 買い目実績ラボを開く](./01_betting_results_lab)")
     with st.expander("データの保存・復元", expanded=False):
         if st.session_state.get("draft_restored"):
             st.success("前回の一時保存データを復元しました。", icon=":material/restore:")
@@ -498,12 +498,20 @@ st.markdown(
     f'<div class="racebar"><div class="race-no">{race_no}</div><strong>{race_name}</strong><span>{race_meta or "レース情報を入力してください"}</span></div>',
     unsafe_allow_html=True,
 )
-st.markdown(
-    '<div class="lab-link"><div><strong>3年分の買い目実績を少しずつ蓄積する</strong>'
-    '<span>netkeiba・IPATなど外部で買った馬券、買った理由、振り返りをAIの学習ノートへ追加できます。</span></div>'
-    '<a href="./買い目実績ラボ" target="_self">買い目実績ラボへ</a></div>',
-    unsafe_allow_html=True,
-)
+lab_col1, lab_col2 = st.columns([4, 1.25])
+with lab_col1:
+    st.markdown(
+        '<div class="lab-link"><div><strong>3年分の買い目実績を少しずつ蓄積する</strong>'
+        '<span>netkeiba・IPATなど外部で買った馬券、買った理由、振り返りをAIの学習ノートへ追加できます。</span></div></div>',
+        unsafe_allow_html=True,
+    )
+with lab_col2:
+    st.markdown('<div class="lab-link-button">', unsafe_allow_html=True)
+    try:
+        st.page_link("pages/01_betting_results_lab.py", label="買い目実績ラボへ", icon="📝", width="stretch")
+    except Exception:
+        st.link_button("買い目実績ラボへ", "./01_betting_results_lab", icon="📝", width="stretch")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 steps = ["1 取込", "2 傾向・評価", "3 スコア・印", "4 オッズ・状態", "5 買い目", "6 出力"]
 with st.container(key="workflow_nav"):
