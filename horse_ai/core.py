@@ -1860,6 +1860,141 @@ def ocr_popular_odds_image_with_tesseract(data: bytes) -> str:
     return "\n".join(texts)
 
 
+def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str = "出馬表画像") -> tuple[dict, list[dict], str, list[str]]:
+    """Parse a netkeiba desktop race-table screenshot using only Tesseract.
+
+    This is the deploy-friendly fallback for Render/Linux where macOS Vision is
+    unavailable.  The target layout is the netkeiba race table screenshot: header
+    race information at the top and a fixed column table below.
+    """
+    try:
+        import pytesseract
+    except ImportError as exc:
+        raise RuntimeError("Tesseract OCR用のPythonライブラリが未導入です。") from exc
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+    image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
+    image = ImageOps.autocontrast(image, cutoff=1)
+    width, height = image.size
+
+    def rel_crop(box: tuple[float, float, float, float], scale: float = 3.2) -> Image.Image:
+        x1, y1, x2, y2 = box
+        crop = image.crop((int(width * x1), int(height * y1), int(width * x2), int(height * y2)))
+        if scale and scale != 1:
+            crop = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))), Image.Resampling.LANCZOS)
+        crop = ImageOps.autocontrast(crop, cutoff=1)
+        crop = ImageEnhance.Contrast(crop).enhance(1.35)
+        crop = crop.filter(ImageFilter.UnsharpMask(radius=1.0, percent=140, threshold=3))
+        return crop
+
+    def ocr(box: tuple[float, float, float, float], lang: str = "jpn+eng", psm: int = 7, whitelist: str = "") -> str:
+        config = f"--psm {psm}"
+        if whitelist:
+            config += f' -c tessedit_char_whitelist="{whitelist}"'
+        text = pytesseract.image_to_string(rel_crop(box), lang=lang, config=config)
+        text = unicodedata.normalize("NFKC", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    top_text = ocr((0.00, 0.00, 0.72, 0.18), psm=6)
+    file_text = unicodedata.normalize("NFKC", filename)
+    combined_top = f"{file_text} {top_text}"
+
+    info = {k: "" for k in ["日付", "競馬場", "開催回", "開催日", "レース番号", "レース名", "芝/ダート", "距離", "馬場", "天候", "頭数", "発走時刻"]}
+    date_match = re.search(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", combined_top)
+    if date_match:
+        y, m, d = date_match.groups()
+        info["日付"] = f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+    race_match = re.search(r"(札幌|函館|福島|新潟|東京|中山|中京|京都|阪神|小倉)\s*(\d{1,2})R", combined_top, re.I)
+    if race_match:
+        info["競馬場"] = race_match.group(1)
+        info["レース番号"] = race_match.group(2)
+    venue_match = re.search(r"(札幌|函館|福島|新潟|東京|中山|中京|京都|阪神|小倉)", combined_top)
+    if venue_match and not info["競馬場"]:
+        info["競馬場"] = venue_match.group(1)
+    name_match = re.search(r"[-ー]\s*(.+?)\s*(?:\([GJ]?\d\))?\s*出馬表\s*[-ー]", file_text)
+    if name_match:
+        info["レース名"] = name_match.group(1).strip()
+    else:
+        name_match = re.search(r"^\s*(\d{1,2}R\s*)?([^\s]+(?:杯|賞|S|ステークス|記念|カップ))", top_text)
+        if name_match:
+            info["レース名"] = name_match.group(2).strip()
+    start_match = re.search(r"(\d{1,2}:\d{2})\s*発走", combined_top)
+    if start_match:
+        info["発走時刻"] = start_match.group(1)
+    surface_match = re.search(r"(芝|ダート|ダ)\s*(\d{3,4})\s*m", combined_top, re.I)
+    if surface_match:
+        info["芝/ダート"] = "ダート" if surface_match.group(1) in {"ダ", "ダート"} else "芝"
+        info["距離"] = surface_match.group(2)
+    weather_match = re.search(r"天候\s*[:：]?\s*([晴曇雨雪小]+)", combined_top)
+    if weather_match:
+        info["天候"] = weather_match.group(1)[0]
+    track_match = re.search(r"馬場\s*[:：]?\s*(良|稍重|稍|重|不良)", combined_top)
+    if track_match:
+        info["馬場"] = "稍重" if track_match.group(1) == "稍" else track_match.group(1)
+    count_match = re.search(r"(\d{1,2})\s*頭", combined_top)
+    expected_count = int(count_match.group(1)) if count_match else 0
+    if expected_count:
+        info["頭数"] = str(expected_count)
+
+    # Data rows begin immediately below the beige table header.  The row height
+    # is stable across the netkeiba desktop screenshots; when head count is
+    # known, use it to avoid reading the footer area.
+    row_top = 0.384
+    row_h = 0.0435
+    max_rows = expected_count if expected_count else min(18, max(1, int((0.992 - row_top) / row_h)))
+    horses: list[dict] = []
+    transcript_lines = [f"【ヘッダー】 {top_text}"]
+
+    def clean_name(text: str) -> str:
+        text = re.sub(r"^[^0-9A-Za-zぁ-んァ-ヶ一-龠]+", "", text)
+        text = re.sub(r"[^0-9A-Za-zぁ-んァ-ヶ一-龠ー・ヴヵヶ]+$", "", text)
+        return text.strip()
+
+    for idx in range(max_rows):
+        y1 = row_top + row_h * idx
+        y2 = min(0.996, y1 + row_h)
+        if y1 >= 0.996:
+            break
+        frame = ocr((0.006, y1, 0.033, y2), lang="eng", whitelist="12345678")
+        number = ocr((0.037, y1, 0.064, y2), lang="eng", whitelist="0123456789")
+        name = clean_name(ocr((0.096, y1, 0.278, y2), psm=7))
+        sex_age = ocr((0.282, y1, 0.320, y2), whitelist="牡牝セ0123456789")
+        weight = ocr((0.322, y1, 0.360, y2), lang="eng", whitelist="0123456789.")
+        jockey = ocr((0.358, y1, 0.414, y2), psm=7)
+        stable = ocr((0.414, y1, 0.498, y2), psm=7)
+        odds = ocr((0.584, y1, 0.627, y2), lang="eng", whitelist="0123456789.")
+        popularity = ocr((0.628, y1, 0.661, y2), lang="eng", whitelist="0123456789")
+        if not name and not number:
+            continue
+        horse_no = int(re.sub(r"\D", "", number) or (idx + 1))
+        frame_no = re.sub(r"\D", "", frame)
+        stable = re.sub(r"^(?:美浦|栗東)\s*", "", stable).strip()
+        odds_match = re.search(r"\d+(?:\.\d+)?", odds)
+        pop_match = re.search(r"\d{1,2}", popularity)
+        horse = {k: "" for k in HORSE_COLUMNS}
+        horse.update({
+            "馬番": horse_no,
+            "枠番": int(frame_no) if frame_no else "",
+            "馬名": name,
+            "性齢": sex_age,
+            "斤量": weight,
+            "騎手": jockey,
+            "厩舎": stable,
+            "人気": int(pop_match.group()) if pop_match else "",
+            "単勝オッズ": float(odds_match.group()) if odds_match else "",
+        })
+        horses.append(horse)
+        transcript_lines.append(" ".join(str(v) for v in [horse.get("枠番"), horse_no, name, sex_age, weight, jockey, stable, odds, popularity] if v not in ("", None)))
+
+    if not horses:
+        raise RuntimeError("Tesseract固定出馬表OCRで出走馬を読み取れませんでした。画像の表示範囲・倍率を確認してください。")
+    warnings = [f"Tesseract固定出馬表OCRで{len(horses)}頭を読み取りました"]
+    if expected_count and len(horses) < expected_count:
+        warnings.append(f"ヘッダー上は{expected_count}頭ですが、読み取れたのは{len(horses)}頭です。スクショ下部が切れていないか確認してください。")
+    warnings.extend(_validate_extraction(info, horses))
+    return info, horses, "\n".join(transcript_lines), list(dict.fromkeys(warnings))
+
+
 def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, float], str]:
     """Read netkeiba popular-odds screenshot by fixed cell regions.
 

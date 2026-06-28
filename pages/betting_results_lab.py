@@ -12,6 +12,7 @@ from horse_ai.core import (
     add_betting_journal_entries,
     add_betting_journal_entry,
     betting_journal_entries,
+    extract_netkeiba_race_table_image_with_tesseract,
     extract_screenshot_with_macos_vision,
     load_prediction_profile,
     ocr_popular_odds_image_with_tesseract,
@@ -210,25 +211,37 @@ def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
                 texts.append(f"【{name} / 出馬表専用解析】\n{text.strip()}")
             notes.extend(f"{name}: {warning}" for warning in warnings)
         except Exception as exc:
-            notes.append(f"{name}: 出馬表専用解析は使えなかったため、通常OCRで読み取ります（{exc}）")
+            notes.append(f"{name}: Mac出馬表解析は使えなかったため、Tesseract固定出馬表OCRへ切り替えます（{exc}）")
             try:
-                fallback_text = ocr_popular_odds_image_with_tesseract(data)
-                if fallback_text.strip():
-                    texts.append(f"【{name} / 通常OCR】\n{fallback_text.strip()}")
-                    fallback_info, fallback_horses = parse_inputs({
-                        "レース情報": fallback_text,
-                        "出馬表": fallback_text,
-                        "過去走情報": "",
-                        "コメント": "",
-                        "任意メモ": "",
-                    })
-                    merged_info.update({k: v for k, v in fallback_info.items() if v not in ("", None)})
-                    for horse in fallback_horses:
-                        number = str(horse.get("馬番", "")).strip()
-                        if number.isdigit() and int(number) not in merged_horses:
-                            merged_horses[int(number)] = horse
-            except Exception as fallback_exc:
-                notes.append(f"{name}: 通常OCRにも失敗しました（{fallback_exc}）")
+                info, horses, text, warnings = extract_netkeiba_race_table_image_with_tesseract(data, name)
+                merged_info.update({k: v for k, v in info.items() if v not in ("", None)})
+                for horse in horses:
+                    number = str(horse.get("馬番", "")).strip()
+                    if number.isdigit():
+                        merged_horses[int(number)] = horse
+                if text.strip():
+                    texts.append(f"【{name} / Tesseract固定出馬表OCR】\n{text.strip()}")
+                notes.extend(f"{name}: {warning}" for warning in warnings)
+            except Exception as fixed_exc:
+                notes.append(f"{name}: Tesseract固定出馬表OCRも使えなかったため、通常OCRで読み取ります（{fixed_exc}）")
+                try:
+                    fallback_text = ocr_popular_odds_image_with_tesseract(data)
+                    if fallback_text.strip():
+                        texts.append(f"【{name} / 通常OCR】\n{fallback_text.strip()}")
+                        fallback_info, fallback_horses = parse_inputs({
+                            "レース情報": fallback_text,
+                            "出馬表": fallback_text,
+                            "過去走情報": "",
+                            "コメント": "",
+                            "任意メモ": "",
+                        })
+                        merged_info.update({k: v for k, v in fallback_info.items() if v not in ("", None)})
+                        for horse in fallback_horses:
+                            number = str(horse.get("馬番", "")).strip()
+                            if number.isdigit() and int(number) not in merged_horses:
+                                merged_horses[int(number)] = horse
+                except Exception as fallback_exc:
+                    notes.append(f"{name}: 通常OCRにも失敗しました（{fallback_exc}）")
     return merged_info, [merged_horses[n] for n in sorted(merged_horses)], "\n\n".join(texts), list(dict.fromkeys(notes))
 
 
