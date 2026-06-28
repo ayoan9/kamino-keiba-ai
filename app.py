@@ -4,7 +4,7 @@ import json
 import os
 import html
 import hmac
-import importlib
+import importlib.util
 import platform
 import re
 import sys
@@ -43,10 +43,14 @@ st.set_page_config(
 
 if st.query_params.get("view") == "lab":
     os.environ["KAMINO_EMBED_LAB"] = "1"
-    if "pages.betting_results_lab" in sys.modules:
-        importlib.reload(sys.modules["pages.betting_results_lab"])
-    else:
-        importlib.import_module("pages.betting_results_lab")
+    lab_path = Path(__file__).parent / "pages" / "betting_results_lab.py"
+    spec = importlib.util.spec_from_file_location("kamino_betting_results_lab", lab_path)
+    if spec is None or spec.loader is None:
+        st.error("買い目実績ラボを読み込めませんでした。")
+        st.stop()
+    lab_module = importlib.util.module_from_spec(spec)
+    sys.modules["kamino_betting_results_lab"] = lab_module
+    spec.loader.exec_module(lab_module)
     st.stop()
 
 st.markdown("""
