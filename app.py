@@ -4,8 +4,10 @@ import json
 import os
 import html
 import hmac
+import importlib
 import platform
 import re
+import sys
 import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -38,6 +40,14 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+if st.query_params.get("view") == "lab":
+    os.environ["KAMINO_EMBED_LAB"] = "1"
+    if "pages.betting_results_lab" in sys.modules:
+        importlib.reload(sys.modules["pages.betting_results_lab"])
+    else:
+        importlib.import_module("pages.betting_results_lab")
+    st.stop()
 
 st.markdown("""
 <style>
@@ -426,10 +436,7 @@ with st.sidebar:
         st.session_state.race = new_state()
         st.session_state.draft_restored = False
         st.rerun()
-    try:
-        st.page_link("pages/01_betting_results_lab.py", label="買い目実績ラボを開く", icon="📝", width="stretch")
-    except Exception:
-        st.markdown("[📝 買い目実績ラボを開く](./01_betting_results_lab)")
+    st.link_button("買い目実績ラボを開く", "/?view=lab", icon="📝", width="stretch")
     with st.expander("データの保存・復元", expanded=False):
         if st.session_state.get("draft_restored"):
             st.success("前回の一時保存データを復元しました。", icon=":material/restore:")
@@ -507,10 +514,7 @@ with lab_col1:
     )
 with lab_col2:
     st.markdown('<div class="lab-link-button">', unsafe_allow_html=True)
-    try:
-        st.page_link("pages/01_betting_results_lab.py", label="買い目実績ラボへ", icon="📝", width="stretch")
-    except Exception:
-        st.link_button("買い目実績ラボへ", "./01_betting_results_lab", icon="📝", width="stretch")
+    st.link_button("買い目実績ラボへ", "/?view=lab", icon="📝", width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
 steps = ["1 取込", "2 傾向・評価", "3 スコア・印", "4 オッズ・状態", "5 買い目", "6 出力"]

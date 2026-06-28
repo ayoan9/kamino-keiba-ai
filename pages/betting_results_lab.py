@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 from datetime import datetime
 
 import pandas as pd
@@ -16,12 +17,13 @@ from horse_ai.core import (
 )
 
 
-st.set_page_config(
-    page_title="買い目実績ラボ｜競馬予想AI",
-    page_icon="📝",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+if os.environ.get("KAMINO_EMBED_LAB") != "1":
+    st.set_page_config(
+        page_title="買い目実績ラボ｜競馬予想AI",
+        page_icon="📝",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
 
 st.markdown(
     """
@@ -188,10 +190,7 @@ with nav_col1:
     )
 with nav_col2:
     st.markdown('<div class="lab-back">', unsafe_allow_html=True)
-    try:
-        st.page_link("app.py", label="予想画面へ戻る", icon="🏇", width="stretch")
-    except Exception:
-        st.link_button("予想画面へ戻る", "/", icon="🏇", width="stretch")
+    st.link_button("予想画面へ戻る", "/", icon="🏇", width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
 profile = load_prediction_profile()
