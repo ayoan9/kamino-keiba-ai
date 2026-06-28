@@ -1,4 +1,4 @@
-from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entry, analyze_race_trends, archive_prediction, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
+from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
 from horse_ai.historical import _available_month_tokens, _day_races, _result_detail, aggregate_history
 from horse_ai.jra_fetcher import _anchor_actions, _race_identity, _single_odds, _tables
 
@@ -299,6 +299,21 @@ def test_external_betting_journal_is_added_to_ai_prompt(tmp_path):
     prompt = prediction_policy_prompt(profile)
     assert "外部買い目ノート1件" in prompt
     assert "小回り重馬場は位置取りを重視" in prompt
+
+
+def test_external_betting_journal_bulk_import_and_listing(tmp_path):
+    path = tmp_path / "prediction_profile.json"
+    profile, report = add_betting_journal_entries([
+        {"レース": "A", "券種": "馬連", "買い目": "1-2", "購入額": 500, "払戻額": 0, "振り返り": "相手抜け"},
+        {"レース": "B", "券種": "3連複", "買い目": "1-2-3", "購入額": "1,000", "払戻額": "4,500", "次回への学び": "軸は良かった"},
+        {},
+    ], str(path))
+    assert report["取込"] == 2 and report["スキップ"] == 1
+    assert profile["betting_journal"]["count"] == 2
+    assert profile["betting_journal"]["stake_total"] == 1500
+    assert profile["betting_journal"]["return_total"] == 4500
+    entries = betting_journal_entries(str(path))
+    assert [entry["レース"] for entry in entries] == ["B", "A"]
 
 
 def test_result_history_import_skips_incomplete_and_deduplicates(tmp_path):

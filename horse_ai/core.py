@@ -437,11 +437,17 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
     """Append an external betting/reflection note and aggregate it for future prompts."""
     profile = load_prediction_profile(path)
     journal = profile.setdefault("betting_journal", {})
-    required_text = " ".join(str(entry.get(key, "")).strip() for key in ("買い目", "買った理由", "振り返り", "次回への学び"))
+    required_text = " ".join(str(entry.get(key, "")).strip() for key in ("買い目", "買った理由", "振り返り", "次回への学び")).strip()
     if not required_text:
         raise ValueError("買い目、理由、振り返りのいずれかを入力してください")
-    stake = int(float(entry.get("購入額", 0) or 0))
-    payout = int(float(entry.get("払戻額", 0) or 0))
+    def yen(value) -> int:
+        text = str(value or "").replace(",", "").replace("円", "").strip()
+        try:
+            return int(float(text))
+        except ValueError:
+            return 0
+    stake = yen(entry.get("購入額", 0))
+    payout = yen(entry.get("払戻額", 0))
     normalized = {
         "登録日時": entry.get("登録日時") or datetime.now().isoformat(timespec="seconds"),
         "レース": str(entry.get("レース", "")).strip(),
@@ -483,6 +489,31 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
     profile_path = Path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
     return profile
+
+
+def add_betting_journal_entries(entries: list[dict], path: str = "data/prediction_profile.json") -> tuple[dict, dict]:
+    """Append multiple external betting notes and report import results."""
+    imported, skipped, errors = 0, 0, []
+    profile = load_prediction_profile(path)
+    for index, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            skipped += 1
+            continue
+        try:
+            profile = add_betting_journal_entry(entry, path)
+            imported += 1
+        except Exception as exc:
+            skipped += 1
+            errors.append(f"{index}件目: {exc}")
+    journal = profile.get("betting_journal", {})
+    return profile, {"取込": imported, "スキップ": skipped, "エラー": errors, "累計": int(journal.get("count", 0) or 0)}
+
+
+def betting_journal_entries(path: str = "data/prediction_profile.json", limit: int = 200) -> list[dict]:
+    """Return recent external betting notes, newest first."""
+    profile = load_prediction_profile(path)
+    entries = [item for item in profile.get("betting_journal", {}).get("entries", []) if isinstance(item, dict)]
+    return list(reversed(entries[-limit:]))
 
 
 def parse_finish_order(text: str) -> list[str]:
