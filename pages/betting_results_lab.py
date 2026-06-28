@@ -12,6 +12,7 @@ from horse_ai.core import (
     add_betting_journal_entries,
     add_betting_journal_entry,
     betting_journal_entries,
+    extract_screenshot_with_macos_vision,
     load_prediction_profile,
     ocr_popular_odds_image_with_tesseract,
     parse_betting_history_text,
@@ -188,6 +189,49 @@ def ocr_uploaded_images(files) -> tuple[str, list[str]]:
     return "\n\n".join(texts), notes
 
 
+def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
+    """Use the same race-table image parser as the main prediction flow when possible."""
+    merged_info: dict = {}
+    merged_horses: dict[int, dict] = {}
+    texts: list[str] = []
+    notes: list[str] = []
+    for file in files or []:
+        data = file.getvalue()
+        name = getattr(file, "name", "画像")
+        mime = getattr(file, "type", "") or "image/png"
+        try:
+            info, horses, text, warnings = extract_screenshot_with_macos_vision(data, name, mime)
+            merged_info.update({k: v for k, v in info.items() if v not in ("", None)})
+            for horse in horses:
+                number = str(horse.get("馬番", "")).strip()
+                if number.isdigit():
+                    merged_horses[int(number)] = horse
+            if text.strip():
+                texts.append(f"【{name} / 出馬表専用解析】\n{text.strip()}")
+            notes.extend(f"{name}: {warning}" for warning in warnings)
+        except Exception as exc:
+            notes.append(f"{name}: 出馬表専用解析は使えなかったため、通常OCRで読み取ります（{exc}）")
+            try:
+                fallback_text = ocr_popular_odds_image_with_tesseract(data)
+                if fallback_text.strip():
+                    texts.append(f"【{name} / 通常OCR】\n{fallback_text.strip()}")
+                    fallback_info, fallback_horses = parse_inputs({
+                        "レース情報": fallback_text,
+                        "出馬表": fallback_text,
+                        "過去走情報": "",
+                        "コメント": "",
+                        "任意メモ": "",
+                    })
+                    merged_info.update({k: v for k, v in fallback_info.items() if v not in ("", None)})
+                    for horse in fallback_horses:
+                        number = str(horse.get("馬番", "")).strip()
+                        if number.isdigit() and int(number) not in merged_horses:
+                            merged_horses[int(number)] = horse
+            except Exception as fallback_exc:
+                notes.append(f"{name}: 通常OCRにも失敗しました（{fallback_exc}）")
+    return merged_info, [merged_horses[n] for n in sorted(merged_horses)], "\n\n".join(texts), list(dict.fromkeys(notes))
+
+
 def race_label_from_info(info: dict) -> str:
     parts = [
         str(info.get("日付", "") or ""),
@@ -285,11 +329,14 @@ with tabs[0]:
     )
     auto_fetch_result = st.checkbox("レース情報が取れたらJRA公式から結果取得も試す", value=False)
     if st.button("スクショを解析して候補を作成", type="primary", disabled=not (race_images or bet_images or result_images)):
-        race_ocr, race_notes = ocr_uploaded_images(race_images)
+        race_info, horses, race_ocr, race_notes = extract_race_screenshots(race_images)
         bet_ocr, bet_notes = ocr_uploaded_images(bet_images)
         result_ocr, result_notes = ocr_uploaded_images(result_images)
         notes = race_notes + bet_notes + result_notes
-        race_info, horses = parse_inputs({"レース情報": race_ocr, "出馬表": race_ocr, "過去走情報": "", "コメント": "", "任意メモ": ""})
+        if not horses and race_ocr.strip():
+            fallback_info, fallback_horses = parse_inputs({"レース情報": race_ocr, "出馬表": race_ocr, "過去走情報": "", "コメント": "", "任意メモ": ""})
+            race_info.update({k: v for k, v in fallback_info.items() if v not in ("", None)})
+            horses = fallback_horses
         parsed_bets, bet_parse_notes = parse_betting_history_text(bet_ocr, "スクショ取込") if bet_ocr.strip() else ([], [])
         notes.extend(bet_parse_notes)
         result_text = result_text_from_ocr(result_ocr)
