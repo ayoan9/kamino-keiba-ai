@@ -13,8 +13,12 @@ from horse_ai.core import (
     add_betting_journal_entry,
     betting_journal_entries,
     load_prediction_profile,
+    ocr_popular_odds_image_with_tesseract,
     parse_betting_history_text,
+    parse_finish_order,
+    parse_inputs,
 )
+from horse_ai.jra_fetcher import fetch_jra_result
 
 
 if os.environ.get("KAMINO_EMBED_LAB") != "1":
@@ -170,6 +174,50 @@ def parse_csv_text(text: str) -> list[dict]:
     return [normalize_row(row) for row in reader]
 
 
+def ocr_uploaded_images(files) -> tuple[str, list[str]]:
+    texts: list[str] = []
+    notes: list[str] = []
+    for file in files or []:
+        try:
+            data = file.getvalue()
+            text = ocr_popular_odds_image_with_tesseract(data)
+            if text.strip():
+                texts.append(f"【{file.name}】\n{text.strip()}")
+        except Exception as exc:
+            notes.append(f"{getattr(file, 'name', '画像')}: OCRに失敗しました（{exc}）")
+    return "\n\n".join(texts), notes
+
+
+def race_label_from_info(info: dict) -> str:
+    parts = [
+        str(info.get("日付", "") or ""),
+        str(info.get("競馬場", "") or ""),
+        f'{info.get("レース番号")}R' if info.get("レース番号") else "",
+        str(info.get("レース名", "") or ""),
+    ]
+    return " ".join(part for part in parts if part).strip()
+
+
+def horses_text_from_rows(horses: list[dict]) -> str:
+    lines = []
+    for horse in horses:
+        no = str(horse.get("馬番", "") or "").strip()
+        name = str(horse.get("馬名", "") or "").strip()
+        pop = str(horse.get("人気", "") or "").strip()
+        odds = str(horse.get("単勝オッズ", "") or "").strip()
+        extras = " ".join(part for part in [f"{pop}人気" if pop else "", f"単勝{odds}" if odds else ""] if part)
+        if no or name:
+            lines.append(" ".join(part for part in [no, name, extras] if part))
+    return "\n".join(lines)
+
+
+def result_text_from_ocr(text: str) -> str:
+    order = parse_finish_order(text)
+    if order:
+        return "\n".join(f"{idx}着 {number}番" for idx, number in enumerate(order[:10], 1))
+    return ""
+
+
 st.markdown(
     """
     <div class="lab-hero">
@@ -211,9 +259,98 @@ m4.metric("的中率", f"{hit_rate:.0f}%" if count else "-")
 
 st.markdown('<div class="hint-card">1レースごとに「何が走って、何を買って、結果がどうで、何を反省したか」だけを残します。蓄積した実績は、裏側で次回以降の買い目提案の参考にします。</div>', unsafe_allow_html=True)
 
-tabs = st.tabs(["実績を登録", "履歴インポート", "蓄積一覧"])
+tabs = st.tabs(["スクショ取込", "実績を登録", "履歴インポート", "蓄積一覧"])
 
 with tabs[0]:
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">スクショから実績候補を作る</div>', unsafe_allow_html=True)
+    st.caption("出走表と買い目のスクショを入れるだけで、レース情報・出走馬・買い目を候補化します。結果スクショがあれば結果も拾います。")
+    race_images = st.file_uploader(
+        "出走表・レース情報のスクショ",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="lab_race_screenshots",
+    )
+    bet_images = st.file_uploader(
+        "買い目・投票履歴のスクショ",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="lab_bet_screenshots",
+    )
+    result_images = st.file_uploader(
+        "結果スクショ（任意）",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="lab_result_screenshots",
+    )
+    auto_fetch_result = st.checkbox("レース情報が取れたらJRA公式から結果取得も試す", value=False)
+    if st.button("スクショを解析して候補を作成", type="primary", disabled=not (race_images or bet_images or result_images)):
+        race_ocr, race_notes = ocr_uploaded_images(race_images)
+        bet_ocr, bet_notes = ocr_uploaded_images(bet_images)
+        result_ocr, result_notes = ocr_uploaded_images(result_images)
+        notes = race_notes + bet_notes + result_notes
+        race_info, horses = parse_inputs({"レース情報": race_ocr, "出馬表": race_ocr, "過去走情報": "", "コメント": "", "任意メモ": ""})
+        parsed_bets, bet_parse_notes = parse_betting_history_text(bet_ocr, "スクショ取込") if bet_ocr.strip() else ([], [])
+        notes.extend(bet_parse_notes)
+        result_text = result_text_from_ocr(result_ocr)
+        if auto_fetch_result and not result_text:
+            try:
+                jra_result = fetch_jra_result(race_info)
+                result_text = jra_result.get("確定着順", "")
+                notes.append("JRA公式から結果を取得しました。")
+            except Exception as exc:
+                notes.append(f"JRA結果取得はできませんでした: {exc}")
+        st.session_state["lab_screenshot_candidate"] = {
+            "race_label": race_label_from_info(race_info),
+            "horses_text": horses_text_from_rows(horses),
+            "bets_text": "\n".join(str(row.get("買い目", "")) for row in parsed_bets if str(row.get("買い目", "")).strip()),
+            "stake": sum(int(row.get("購入額", 0) or 0) for row in parsed_bets),
+            "return": sum(int(row.get("払戻額", 0) or 0) for row in parsed_bets),
+            "result": result_text,
+            "notes": notes,
+            "ocr": "\n\n".join(part for part in [race_ocr, bet_ocr, result_ocr] if part.strip()),
+        }
+        st.rerun()
+    candidate = st.session_state.get("lab_screenshot_candidate")
+    if candidate:
+        st.markdown("#### 取込候補")
+        for note in candidate.get("notes", []):
+            st.info(note)
+        c1, c2 = st.columns(2)
+        with c1:
+            candidate_race = st.text_input("レース", value=candidate.get("race_label", ""), key="candidate_race_label")
+            candidate_horses = st.text_area("出走馬", value=candidate.get("horses_text", ""), height=150, key="candidate_horses")
+            candidate_bets = st.text_area("買い目", value=candidate.get("bets_text", ""), height=150, key="candidate_bets")
+        with c2:
+            candidate_stake = st.number_input("購入額", min_value=0, step=100, value=int(candidate.get("stake", 0) or 0), key="candidate_stake")
+            candidate_return = st.number_input("払戻額", min_value=0, step=100, value=int(candidate.get("return", 0) or 0), key="candidate_return")
+            candidate_result = st.text_area("結果", value=candidate.get("result", ""), height=120, key="candidate_result")
+            candidate_review = st.text_area("振り返り", height=120, placeholder="例）軸は良かったが、相手候補の拾い方を見直したい。", key="candidate_review")
+        with st.expander("OCR全文を確認"):
+            st.text_area("OCR結果", candidate.get("ocr", ""), height=260)
+        if st.button("この候補を実績として保存", type="primary"):
+            try:
+                updated = add_betting_journal_entry({
+                    "レース": candidate_race,
+                    "出走馬": candidate_horses,
+                    "情報源": "スクショ取込",
+                    "券種": "複数券種" if "\n" in candidate_bets.strip() else "",
+                    "買い目": candidate_bets,
+                    "購入額": int(candidate_stake),
+                    "払戻額": int(candidate_return),
+                    "結果": candidate_result,
+                    "振り返り": candidate_review,
+                    "次回への学び": candidate_review,
+                    "登録日時": datetime.now().isoformat(timespec="seconds"),
+                })
+                st.success(f'保存しました。累計{updated.get("betting_journal", {}).get("count", 0)}件です。')
+                del st.session_state["lab_screenshot_candidate"]
+                st.rerun()
+            except Exception as exc:
+                st.error(f"保存できませんでした: {exc}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with tabs[1]:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">1レースの実績を登録</div>', unsafe_allow_html=True)
     st.caption("細かい採点は不要です。出走馬・買い目・結果・振り返りだけ残せば十分です。")
@@ -250,7 +387,7 @@ with tabs[0]:
             st.error(f"保存できませんでした: {exc}")
     st.markdown("</div>", unsafe_allow_html=True)
 
-with tabs[1]:
+with tabs[2]:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">JRA/IPAT・netkeiba履歴から半自動取込</div>', unsafe_allow_html=True)
     st.caption("ログイン情報は保存しません。各サイトで投票履歴やMy収支を開き、表をコピーするかHTML保存したファイルを読み込ませてください。")
@@ -332,7 +469,7 @@ with tabs[1]:
                 st.warning(message)
     st.markdown("</div>", unsafe_allow_html=True)
 
-with tabs[2]:
+with tabs[3]:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">蓄積一覧</div>', unsafe_allow_html=True)
     entries = betting_journal_entries(limit=300)
