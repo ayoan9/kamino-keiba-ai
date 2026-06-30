@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -17,10 +18,8 @@ from horse_ai.core import (
     load_prediction_profile,
     ocr_popular_odds_image_with_tesseract,
     parse_betting_history_text,
-    parse_finish_order,
     parse_inputs,
 )
-from horse_ai.jra_fetcher import fetch_jra_result
 
 
 if os.environ.get("KAMINO_EMBED_LAB") != "1":
@@ -176,20 +175,6 @@ def parse_csv_text(text: str) -> list[dict]:
     return [normalize_row(row) for row in reader]
 
 
-def ocr_uploaded_images(files) -> tuple[str, list[str]]:
-    texts: list[str] = []
-    notes: list[str] = []
-    for file in files or []:
-        try:
-            data = file.getvalue()
-            text = ocr_popular_odds_image_with_tesseract(data)
-            if text.strip():
-                texts.append(f"【{file.name}】\n{text.strip()}")
-        except Exception as exc:
-            notes.append(f"{getattr(file, 'name', '画像')}: OCRに失敗しました（{exc}）")
-    return "\n\n".join(texts), notes
-
-
 def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
     """Use the same race-table image parser as the main prediction flow when possible."""
     merged_info: dict = {}
@@ -268,11 +253,64 @@ def horses_text_from_rows(horses: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def result_text_from_ocr(text: str) -> str:
-    order = parse_finish_order(text)
-    if order:
-        return "\n".join(f"{idx}着 {number}番" for idx, number in enumerate(order[:10], 1))
-    return ""
+def horse_choice_label(horse: dict) -> str:
+    no = str(horse.get("馬番", "") or "").strip()
+    name = str(horse.get("馬名", "") or "").strip()
+    return " ".join(part for part in [f"{no}番" if no else "", name] if part).strip()
+
+
+def horse_choices_from_rows(horses: list[dict]) -> list[str]:
+    choices = [horse_choice_label(horse) for horse in horses if horse_choice_label(horse)]
+    return [""] + choices
+
+
+def horse_choices_from_text(text: str, fallback_horses: list[dict]) -> list[str]:
+    choices: list[str] = []
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = re.match(r"(\d{1,2})(?:番)?\s+(.+)", line)
+        if match:
+            no, rest = match.groups()
+            name = re.sub(r"\s+\d+人気.*$", "", rest).strip()
+            choices.append(f"{no}番 {name}")
+    if not choices:
+        choices = horse_choices_from_rows(fallback_horses)[1:]
+    return [""] + list(dict.fromkeys(choices))
+
+
+def compact_horse_number(label: str) -> str:
+    match = re.search(r"(\d{1,2})\s*番", str(label or ""))
+    if match:
+        return match.group(1)
+    match = re.search(r"^\s*(\d{1,2})\b", str(label or ""))
+    return match.group(1) if match else ""
+
+
+def build_bet_lines(rows: list[dict]) -> tuple[str, int, list[str]]:
+    lines: list[str] = []
+    ticket_types: list[str] = []
+    total = 0
+    for row in rows:
+        ticket = str(row.get("券種", "") or "").strip()
+        stake = int(row.get("金額", 0) or 0)
+        if not ticket or stake <= 0:
+            continue
+        selected = [compact_horse_number(row.get(key, "")) for key in ("馬1", "馬2", "馬3")]
+        selected = [x for x in selected if x]
+        required = 1 if ticket in {"単勝", "複勝"} else 2 if ticket in {"枠連", "ワイド", "馬連", "馬単"} else 3
+        if len(selected) < required:
+            continue
+        combo = "-".join(selected[:required])
+        lines.append(f"{ticket} {combo} {stake:,}円")
+        ticket_types.append(ticket)
+        total += stake
+    return "\n".join(lines), total, sorted(set(ticket_types))
+
+
+def joined_selected(values: list[str]) -> str:
+    return "、".join(str(v) for v in values if str(v).strip())
 
 
 st.markdown(
@@ -316,91 +354,143 @@ m4.metric("的中率", f"{hit_rate:.0f}%" if count else "-")
 
 st.markdown('<div class="hint-card">1レースごとに「何が走って、何を買って、結果がどうで、何を反省したか」だけを残します。蓄積した実績は、裏側で次回以降の買い目提案の参考にします。</div>', unsafe_allow_html=True)
 
-tabs = st.tabs(["スクショ取込", "実績を登録", "履歴インポート", "蓄積一覧"])
+tabs = st.tabs(["出馬表取込・選択入力", "手入力", "履歴インポート", "蓄積一覧"])
 
 with tabs[0]:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">スクショから実績候補を作る</div>', unsafe_allow_html=True)
-    st.caption("出走表と買い目のスクショを入れるだけで、レース情報・出走馬・買い目を候補化します。結果スクショがあれば結果も拾います。")
+    st.markdown('<div class="section-title">出馬表スクショから選択式で実績登録</div>', unsafe_allow_html=True)
+    st.caption("画像読み取りは出馬表だけに絞ります。買い目・結果・振り返りは、読み取った馬番候補から選ぶだけで登録できます。")
     race_images = st.file_uploader(
         "出走表・レース情報のスクショ",
         type=["png", "jpg", "jpeg", "webp"],
         accept_multiple_files=True,
         key="lab_race_screenshots",
     )
-    bet_images = st.file_uploader(
-        "買い目・投票履歴のスクショ",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,
-        key="lab_bet_screenshots",
-    )
-    result_images = st.file_uploader(
-        "結果スクショ（任意）",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,
-        key="lab_result_screenshots",
-    )
-    auto_fetch_result = st.checkbox("レース情報が取れたらJRA公式から結果取得も試す", value=False)
-    if st.button("スクショを解析して候補を作成", type="primary", disabled=not (race_images or bet_images or result_images)):
+    if st.button("出馬表を読み取る", type="primary", disabled=not race_images):
         race_info, horses, race_ocr, race_notes = extract_race_screenshots(race_images)
-        bet_ocr, bet_notes = ocr_uploaded_images(bet_images)
-        result_ocr, result_notes = ocr_uploaded_images(result_images)
-        notes = race_notes + bet_notes + result_notes
         if not horses and race_ocr.strip():
             fallback_info, fallback_horses = parse_inputs({"レース情報": race_ocr, "出馬表": race_ocr, "過去走情報": "", "コメント": "", "任意メモ": ""})
             race_info.update({k: v for k, v in fallback_info.items() if v not in ("", None)})
             horses = fallback_horses
-        parsed_bets, bet_parse_notes = parse_betting_history_text(bet_ocr, "スクショ取込") if bet_ocr.strip() else ([], [])
-        notes.extend(bet_parse_notes)
-        result_text = result_text_from_ocr(result_ocr)
-        if auto_fetch_result and not result_text:
-            try:
-                jra_result = fetch_jra_result(race_info)
-                result_text = jra_result.get("確定着順", "")
-                notes.append("JRA公式から結果を取得しました。")
-            except Exception as exc:
-                notes.append(f"JRA結果取得はできませんでした: {exc}")
         st.session_state["lab_screenshot_candidate"] = {
             "race_label": race_label_from_info(race_info),
             "horses_text": horses_text_from_rows(horses),
-            "bets_text": "\n".join(str(row.get("買い目", "")) for row in parsed_bets if str(row.get("買い目", "")).strip()),
-            "stake": sum(int(row.get("購入額", 0) or 0) for row in parsed_bets),
-            "return": sum(int(row.get("払戻額", 0) or 0) for row in parsed_bets),
-            "result": result_text,
-            "notes": notes,
-            "ocr": "\n\n".join(part for part in [race_ocr, bet_ocr, result_ocr] if part.strip()),
+            "horses": horses,
+            "notes": race_notes,
+            "ocr": race_ocr,
         }
         st.rerun()
     candidate = st.session_state.get("lab_screenshot_candidate")
     if candidate:
-        st.markdown("#### 取込候補")
+        st.markdown("#### 1. レースと出走馬を確認")
         for note in candidate.get("notes", []):
             st.info(note)
-        c1, c2 = st.columns(2)
+        horses = candidate.get("horses", []) or []
+        c1, c2 = st.columns([1, 1.15])
         with c1:
             candidate_race = st.text_input("レース", value=candidate.get("race_label", ""), key="candidate_race_label")
             candidate_horses = st.text_area("出走馬", value=candidate.get("horses_text", ""), height=150, key="candidate_horses")
-            candidate_bets = st.text_area("買い目", value=candidate.get("bets_text", ""), height=150, key="candidate_bets")
         with c2:
-            candidate_stake = st.number_input("購入額", min_value=0, step=100, value=int(candidate.get("stake", 0) or 0), key="candidate_stake")
-            candidate_return = st.number_input("払戻額", min_value=0, step=100, value=int(candidate.get("return", 0) or 0), key="candidate_return")
-            candidate_result = st.text_area("結果", value=candidate.get("result", ""), height=120, key="candidate_result")
-            candidate_review = st.text_area("振り返り", height=120, placeholder="例）軸は良かったが、相手候補の拾い方を見直したい。", key="candidate_review")
+            source = st.selectbox("購入・記録元", ["netkeiba", "IPAT", "JRA", "他ツール", "手入力"], key="candidate_source")
+            candidate_return = st.number_input("払戻額", min_value=0, step=100, value=0, key="candidate_return")
+            st.caption("出走馬の読み取りがズレた場合は、左の出走馬欄を直接直せます。買い目候補は下の選択肢から選びます。")
+        horse_options = horse_choices_from_text(candidate_horses, horses)
+
+        st.markdown("#### 2. 買い目を選択")
+        default_rows = pd.DataFrame([
+            {"券種": "", "馬1": "", "馬2": "", "馬3": "", "金額": 0}
+            for _ in range(8)
+        ])
+        bet_df = st.data_editor(
+            default_rows,
+            hide_index=True,
+            width="stretch",
+            num_rows="dynamic",
+            column_config={
+                "券種": st.column_config.SelectboxColumn(options=["", "単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単"]),
+                "馬1": st.column_config.SelectboxColumn(options=horse_options),
+                "馬2": st.column_config.SelectboxColumn(options=horse_options),
+                "馬3": st.column_config.SelectboxColumn(options=horse_options),
+                "金額": st.column_config.NumberColumn(min_value=0, step=100, format="%d円"),
+            },
+            key="candidate_bet_builder",
+        )
+        candidate_bets, candidate_stake, ticket_types = build_bet_lines(bet_df.to_dict("records"))
+        st.caption(f"購入額合計: {candidate_stake:,}円")
+        if candidate_bets:
+            st.code(candidate_bets, language=None)
+
+        st.markdown("#### 3. 結果とレース質を選択")
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            first = st.selectbox("1着", horse_options, key="result_first")
+        with r2:
+            second = st.selectbox("2着", horse_options, key="result_second")
+        with r3:
+            third = st.selectbox("3着", horse_options, key="result_third")
+        with r4:
+            hit_status = st.selectbox("馬券結果", ["不的中", "的中", "トリガミ", "見送り"], key="hit_status")
+        p1, p2, p3, p4 = st.columns(4)
+        with p1:
+            pace_type = st.radio("ペース", ["H", "M", "S"], horizontal=True, key="pace_type")
+        with p2:
+            pace_number = st.text_input("ペース具体数字", placeholder="例）前半5F 59.0 / +0.8", key="pace_number")
+        with p3:
+            track_condition = st.selectbox("馬場", ["未入力", "良", "稍重", "重", "不良", "高速", "時計かかる", "内有利", "外有利"], key="track_condition")
+        with p4:
+            race_shape = st.selectbox("展開", ["未入力", "逃げ残り", "先行有利", "差し有利", "追込有利", "内前有利", "外差し", "隊列縦長", "団子"], key="race_shape")
+
+        st.markdown("#### 4. 振り返りを構造化")
+        bought_reason = st.multiselect(
+            "買った理由",
+            ["軸信頼", "相手妙味", "オッズ妙味", "展開利", "馬場適性", "コース適性", "状態良さそう", "騎手評価", "人気過小評価", "実績重視"],
+            key="bought_reason_tags",
+        )
+        review_tags = st.multiselect(
+            "振り返りタグ",
+            ["軸は良かった", "軸選びミス", "相手抜け", "買い目を広げすぎ", "買い目を絞りすぎ", "オッズ判断ミス", "展開読み違い", "馬場読み違い", "ペース読み違い", "状態評価ミス", "穴馬評価成功", "人気馬軽視成功"],
+            key="review_tags",
+        )
+        lesson_tags = st.multiselect(
+            "次回に活かすこと",
+            ["軸の安定感を重視", "穴は相手まで", "展開利を強める", "馬場バイアスを強める", "オッズ妙味の下限を上げる", "点数を絞る", "三連系を控える", "ワイド中心にする", "人気馬の消しを慎重にする"],
+            key="lesson_tags",
+        )
+        free_review = st.text_area("自由メモ", height=100, placeholder="例）想定より流れて差し決着。軸は妥当だったが、相手を内前に寄せすぎた。", key="candidate_review")
         with st.expander("OCR全文を確認"):
             st.text_area("OCR結果", candidate.get("ocr", ""), height=260)
-        if st.button("この候補を実績として保存", type="primary"):
+        result_lines = [
+            "着順: " + " / ".join(part for part in [
+                f"1着 {first}" if first else "",
+                f"2着 {second}" if second else "",
+                f"3着 {third}" if third else "",
+            ] if part),
+            f"馬券結果: {hit_status}",
+            f"ペース: {pace_type}" + (f"（{pace_number}）" if pace_number else ""),
+            f"馬場: {track_condition}",
+            f"展開: {race_shape}",
+        ]
+        structured_review = "\n".join(part for part in [
+            "買った理由: " + joined_selected(bought_reason) if bought_reason else "",
+            "振り返りタグ: " + joined_selected(review_tags) if review_tags else "",
+            "自由メモ: " + free_review if free_review.strip() else "",
+        ] if part)
+        next_lesson = "次回への学び: " + joined_selected(lesson_tags) if lesson_tags else free_review
+        can_save = bool(candidate_bets.strip() or structured_review.strip() or any([first, second, third]))
+        if st.button("この内容で実績を保存", type="primary", disabled=not can_save):
             try:
                 updated = add_betting_journal_entry({
                     "レース": candidate_race,
                     "出走馬": candidate_horses,
-                    "情報源": "スクショ取込",
-                    "券種": "複数券種" if "\n" in candidate_bets.strip() else "",
+                    "情報源": source,
+                    "券種": "複数券種" if len(ticket_types) > 1 else (ticket_types[0] if ticket_types else ""),
                     "買い目": candidate_bets,
                     "購入額": int(candidate_stake),
                     "払戻額": int(candidate_return),
-                    "結果": candidate_result,
-                    "振り返り": candidate_review,
-                    "次回への学び": candidate_review,
+                    "買った理由": joined_selected(bought_reason),
+                    "結果": "\n".join(result_lines),
+                    "振り返り": structured_review,
+                    "次回への学び": next_lesson,
                     "登録日時": datetime.now().isoformat(timespec="seconds"),
                 })
                 st.success(f'保存しました。累計{updated.get("betting_journal", {}).get("count", 0)}件です。')
