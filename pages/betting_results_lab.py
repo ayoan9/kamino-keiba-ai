@@ -418,9 +418,15 @@ m4.metric("的中率", f"{hit_rate:.0f}%" if count else "-")
 
 st.markdown('<div class="hint-card">1レースごとに「何が走って、何を買って、結果がどうで、何を反省したか」だけを残します。蓄積した実績は、裏側で次回以降の買い目提案の参考にします。</div>', unsafe_allow_html=True)
 
-tabs = st.tabs(["出馬表取込・選択入力", "手入力", "履歴インポート", "蓄積一覧"])
+section = st.radio(
+    "表示する機能",
+    ["出馬表取込・選択入力", "手入力", "履歴インポート", "蓄積一覧"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="lab_active_section",
+)
 
-with tabs[0]:
+if section == "出馬表取込・選択入力":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">出馬表スクショから選択式で実績登録</div>', unsafe_allow_html=True)
     st.caption("画像読み取りは出馬表だけに絞ります。買い目・結果・振り返りは、読み取った馬番候補から選ぶだけで登録できます。")
@@ -462,32 +468,50 @@ with tabs[0]:
 
         st.markdown("#### 2. 買い目を選択")
         st.caption("軸流し・マルチ・ボックスは自動で買い目に展開します。金額は1点あたりの購入額として入力してください。")
-        default_rows = pd.DataFrame([
-            {"券種": "", "買い方": "通常", "軸1": "", "軸2": "", "相手1": "", "相手2": "", "相手3": "", "相手4": "", "相手5": "", "1点金額": 0}
-            for _ in range(6)
-        ])
-        bet_df = st.data_editor(
-            default_rows,
-            hide_index=True,
-            width="stretch",
-            num_rows="dynamic",
-            column_config={
-                "券種": st.column_config.SelectboxColumn(options=["", "単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単"]),
-                "買い方": st.column_config.SelectboxColumn(options=["通常", "軸流し", "軸流しマルチ", "マルチ", "ボックス"]),
-                "軸1": st.column_config.SelectboxColumn(options=horse_options),
-                "軸2": st.column_config.SelectboxColumn(options=horse_options),
-                "相手1": st.column_config.SelectboxColumn(options=horse_options),
-                "相手2": st.column_config.SelectboxColumn(options=horse_options),
-                "相手3": st.column_config.SelectboxColumn(options=horse_options),
-                "相手4": st.column_config.SelectboxColumn(options=horse_options),
-                "相手5": st.column_config.SelectboxColumn(options=horse_options),
-                "1点金額": st.column_config.NumberColumn(min_value=0, step=100, format="%d円"),
-            },
-            key="candidate_bet_builder",
-        )
-        candidate_bets, candidate_stake, ticket_types = build_bet_lines(bet_df.to_dict("records"))
+        bet_count = st.number_input("買い方の行数", min_value=1, max_value=5, value=2, step=1, key="candidate_bet_count")
+        bet_rows: list[dict] = []
+        ticket_options = ["", "単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単"]
+        method_options = ["通常", "軸流し", "軸流しマルチ", "マルチ", "ボックス"]
+        for idx in range(int(bet_count)):
+            with st.container(border=True):
+                st.caption(f"買い方 {idx + 1}")
+                t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
+                with t1:
+                    ticket = st.selectbox("券種", ticket_options, key=f"candidate_ticket_{idx}")
+                with t2:
+                    method = st.selectbox("買い方", method_options, key=f"candidate_method_{idx}")
+                with t3:
+                    axis1 = st.selectbox("軸1", horse_options, key=f"candidate_axis1_{idx}")
+                with t4:
+                    axis2 = st.selectbox("軸2", horse_options, key=f"candidate_axis2_{idx}")
+                o1, o2, o3, o4, o5, amount_col = st.columns([1, 1, 1, 1, 1, 1])
+                with o1:
+                    opponent1 = st.selectbox("相手1", horse_options, key=f"candidate_opp1_{idx}")
+                with o2:
+                    opponent2 = st.selectbox("相手2", horse_options, key=f"candidate_opp2_{idx}")
+                with o3:
+                    opponent3 = st.selectbox("相手3", horse_options, key=f"candidate_opp3_{idx}")
+                with o4:
+                    opponent4 = st.selectbox("相手4", horse_options, key=f"candidate_opp4_{idx}")
+                with o5:
+                    opponent5 = st.selectbox("相手5", horse_options, key=f"candidate_opp5_{idx}")
+                with amount_col:
+                    amount = st.number_input("1点金額", min_value=0, step=100, value=0, key=f"candidate_amount_{idx}")
+                bet_rows.append({
+                    "券種": ticket,
+                    "買い方": method,
+                    "軸1": axis1,
+                    "軸2": axis2,
+                    "相手1": opponent1,
+                    "相手2": opponent2,
+                    "相手3": opponent3,
+                    "相手4": opponent4,
+                    "相手5": opponent5,
+                    "1点金額": amount,
+                })
+        candidate_bets, candidate_stake, ticket_types = build_bet_lines(bet_rows)
         st.caption(f"購入額合計: {candidate_stake:,}円")
-        if candidate_bets:
+        if candidate_bets and st.toggle("展開された買い目を表示", value=False, key="show_expanded_bets"):
             st.code(candidate_bets, language=None)
 
         st.markdown("#### 3. 結果とレース質を選択")
@@ -570,7 +594,7 @@ with tabs[0]:
                 st.error(f"保存できませんでした: {exc}")
     st.markdown("</div>", unsafe_allow_html=True)
 
-with tabs[1]:
+if section == "手入力":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">1レースの実績を登録</div>', unsafe_allow_html=True)
     st.caption("細かい採点は不要です。出走馬・買い目・結果・振り返りだけ残せば十分です。")
@@ -607,7 +631,7 @@ with tabs[1]:
             st.error(f"保存できませんでした: {exc}")
     st.markdown("</div>", unsafe_allow_html=True)
 
-with tabs[2]:
+if section == "履歴インポート":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">JRA/IPAT・netkeiba履歴から半自動取込</div>', unsafe_allow_html=True)
     st.caption("ログイン情報は保存しません。各サイトで投票履歴やMy収支を開き、表をコピーするかHTML保存したファイルを読み込ませてください。")
@@ -689,20 +713,22 @@ with tabs[2]:
                 st.warning(message)
     st.markdown("</div>", unsafe_allow_html=True)
 
-with tabs[3]:
+if section == "蓄積一覧":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">蓄積一覧</div>', unsafe_allow_html=True)
-    entries = betting_journal_entries(limit=300)
+    list_limit = st.selectbox("表示件数", [50, 100, 200, 300], index=0, key="journal_list_limit")
+    entries = betting_journal_entries(limit=int(list_limit))
     if entries:
         table = pd.DataFrame(entries)
         visible_cols = [col for col in ["登録日時", "レース", "出走馬", "情報源", "買い目", "購入額", "払戻額", "収支", "結果", "振り返り"] if col in table.columns]
         st.dataframe(table[visible_cols], hide_index=True, width="stretch")
-        st.download_button(
-            "蓄積データを書き出す",
-            table.to_csv(index=False).encode("utf-8-sig"),
-            "betting_journal_export.csv",
-            "text/csv",
-        )
+        if st.toggle("CSV書き出しを表示", value=False, key="show_journal_export"):
+            st.download_button(
+                "蓄積データを書き出す",
+                table.to_csv(index=False).encode("utf-8-sig"),
+                "betting_journal_export.csv",
+                "text/csv",
+            )
     else:
         st.info("まだ買い目実績はありません。")
     st.markdown("</div>", unsafe_allow_html=True)
