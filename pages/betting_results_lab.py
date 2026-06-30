@@ -403,24 +403,16 @@ with nav_col2:
 profile = load_prediction_profile()
 journal = profile.get("betting_journal", {})
 count = int(journal.get("count", 0) or 0)
-stake = int(journal.get("stake_total", 0) or 0)
-returns = int(journal.get("return_total", 0) or 0)
-profit = int(journal.get("profit_total", 0) or 0)
-hit_count = int(journal.get("hit_count", 0) or 0)
-roi = returns / stake * 100 if stake else 0
-hit_rate = hit_count / count * 100 if count else 0
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("記録数", f"{count}件")
-m2.metric("累計収支", f"{profit:+,}円")
-m3.metric("回収率", f"{roi:.0f}%" if stake else "-")
-m4.metric("的中率", f"{hit_rate:.0f}%" if count else "-")
-
-st.markdown('<div class="hint-card">1レースごとに「何が走って、何を買って、結果がどうで、何を反省したか」だけを残します。蓄積した実績は、裏側で次回以降の買い目提案の参考にします。</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="hint-card">登録済み実績：<strong>{count}件</strong>。'
+    'ここでは収支管理ではなく、「何を買い、どういうレース質で、何を学んだか」を蓄積します。'
+    '保存した実績は次回以降の買い目提案の参考にします。</div>',
+    unsafe_allow_html=True,
+)
 
 section = st.radio(
     "表示する機能",
-    ["出馬表取込・選択入力", "手入力", "履歴インポート", "蓄積一覧"],
+    ["出馬表取込・選択入力", "手入力", "履歴インポート", "登録済み実績一覧"],
     horizontal=True,
     label_visibility="collapsed",
     key="lab_active_section",
@@ -528,10 +520,15 @@ if section == "出馬表取込・選択入力":
         with p1:
             pace_type = st.radio("ペース", ["H", "M", "S"], horizontal=True, key="pace_type")
         with p2:
-            pace_number = st.text_input("ペース具体数字", placeholder="例）前半5F 59.0 / +0.8", key="pace_number")
+            pace_first3f = st.text_input("前半3F", placeholder="例）34.8", key="pace_first3f")
         with p3:
-            track_condition = st.multiselect("馬場", ["良", "稍重", "重", "不良", "高速", "時計かかる", "内有利", "外有利", "フラット", "荒れ馬場"], key="track_condition")
+            pace_first5f = st.text_input("前半5F", placeholder="例）59.0", key="pace_first5f")
         with p4:
+            pace_last3f = st.text_input("後半3F", placeholder="例）35.6", key="pace_last3f")
+        b1, b2 = st.columns(2)
+        with b1:
+            track_condition = st.multiselect("馬場", ["良", "稍重", "重", "不良", "高速", "時計かかる", "内有利", "外有利", "フラット", "荒れ馬場"], key="track_condition")
+        with b2:
             race_shape = st.multiselect("展開", ["逃げ残り", "先行有利", "差し有利", "追込有利", "内前有利", "外差し", "隊列縦長", "団子", "スロー瞬発戦", "持続力戦", "消耗戦"], key="race_shape")
 
         st.markdown("#### 4. 振り返りを構造化")
@@ -553,6 +550,11 @@ if section == "出馬表取込・選択入力":
         free_review = st.text_area("自由メモ", height=100, placeholder="例）想定より流れて差し決着。軸は妥当だったが、相手を内前に寄せすぎた。", key="candidate_review")
         with st.expander("OCR全文を確認"):
             st.text_area("OCR結果", candidate.get("ocr", ""), height=260)
+        lap_summary = " / ".join(part for part in [
+            f"前半3F {pace_first3f}" if pace_first3f else "",
+            f"前半5F {pace_first5f}" if pace_first5f else "",
+            f"後半3F {pace_last3f}" if pace_last3f else "",
+        ] if part) or "未入力"
         result_lines = [
             "着順: " + " / ".join(part for part in [
                 f"1着 {first}" if first else "",
@@ -560,7 +562,8 @@ if section == "出馬表取込・選択入力":
                 f"3着 {third}" if third else "",
             ] if part),
             f"馬券結果: {hit_status}",
-            f"ペース: {pace_type}" + (f"（{pace_number}）" if pace_number else ""),
+            f"ペース: {pace_type}",
+            "ラップ: " + lap_summary,
             "馬場: " + (joined_selected(track_condition) if track_condition else "未入力"),
             "展開: " + (joined_selected(race_shape) if race_shape else "未入力"),
         ]
@@ -713,14 +716,15 @@ if section == "履歴インポート":
                 st.warning(message)
     st.markdown("</div>", unsafe_allow_html=True)
 
-if section == "蓄積一覧":
+if section == "登録済み実績一覧":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">蓄積一覧</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">登録済み実績一覧</div>', unsafe_allow_html=True)
+    st.caption("保存した振り返りを確認できます。収支管理ではなく、予想ロジックの蓄積用メモとして使います。")
     list_limit = st.selectbox("表示件数", [50, 100, 200, 300], index=0, key="journal_list_limit")
     entries = betting_journal_entries(limit=int(list_limit))
     if entries:
         table = pd.DataFrame(entries)
-        visible_cols = [col for col in ["登録日時", "レース", "出走馬", "情報源", "買い目", "購入額", "払戻額", "収支", "結果", "振り返り"] if col in table.columns]
+        visible_cols = [col for col in ["登録日時", "レース", "出走馬", "情報源", "券種", "買い目", "結果", "買った理由", "振り返り", "次回への学び"] if col in table.columns]
         st.dataframe(table[visible_cols], hide_index=True, width="stretch")
         if st.toggle("CSV書き出しを表示", value=False, key="show_journal_export"):
             st.download_button(
