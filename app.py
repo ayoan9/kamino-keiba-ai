@@ -24,9 +24,9 @@ from horse_ai.core import (
     extract_media_with_openai, extract_screenshot_with_macos_vision,
     extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
-    data_path, load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
+    cloud_storage_enabled, data_path, load_cloud_json, load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
     fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
-    save_layout_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
+    save_cloud_json, save_layout_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
 )
 from horse_ai.exporter import image_bytes, render_summary
 from horse_ai.jra_fetcher import fetch_jra_odds, fetch_jra_result
@@ -248,12 +248,18 @@ def draft_path(draft_id: str) -> Path:
 def load_draft(draft_id: str) -> dict | None:
     if not draft_id:
         return None
+    cloud_payload = load_cloud_json("drafts", _safe_draft_id(draft_id))
+    if isinstance(cloud_payload, dict) and isinstance(cloud_payload.get("race"), dict):
+        st.session_state.draft_saved_at = cloud_payload.get("saved_at", cloud_payload.get("updated_at", ""))
+        st.session_state.draft_storage = "Supabase"
+        return cloud_payload["race"]
     path = draft_path(draft_id)
     try:
         if path.exists():
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict) and isinstance(payload.get("race"), dict):
                 st.session_state.draft_saved_at = payload.get("saved_at", "")
+                st.session_state.draft_storage = "ローカル"
                 return payload["race"]
     except (OSError, json.JSONDecodeError):
         return None
@@ -268,11 +274,13 @@ def save_draft(state: dict) -> Path | None:
         DRAFT_ROOT.mkdir(parents=True, exist_ok=True)
         now = datetime.now().isoformat(timespec="seconds")
         payload = {"draft_id": draft_id, "saved_at": now, "race": state}
+        cloud_saved = save_cloud_json("drafts", draft_id, payload)
         path = draft_path(draft_id)
         temp = path.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         os.replace(temp, path)
         st.session_state.draft_saved_at = now
+        st.session_state.draft_storage = "Supabase + ローカル" if cloud_saved else "ローカル"
         return path
     except Exception as exc:
         st.session_state.draft_save_error = str(exc)
@@ -453,6 +461,8 @@ with st.sidebar:
             st.caption(f"自動一時保存: {saved_at}")
         else:
             st.caption("自動一時保存: 有効")
+        storage_label = st.session_state.get("draft_storage") or ("Supabase待機" if cloud_storage_enabled() else "ローカル")
+        st.caption(f"保存先: {storage_label}")
         st.caption("ブラウザを閉じても、同じURLを開くと作業途中から再開できます。")
         if st.session_state.get("draft_save_error"):
             st.warning(f'一時保存エラー: {st.session_state["draft_save_error"]}')

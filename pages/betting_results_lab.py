@@ -16,13 +16,16 @@ from horse_ai.core import (
     add_betting_journal_entries,
     add_betting_journal_entry,
     betting_journal_entries,
+    cloud_storage_enabled,
     data_path,
     extract_netkeiba_race_table_image_with_tesseract,
     extract_screenshot_with_macos_vision,
+    load_cloud_json,
     load_prediction_profile,
     ocr_popular_odds_image_with_tesseract,
     parse_betting_history_text,
     parse_inputs,
+    save_cloud_json,
 )
 
 
@@ -398,6 +401,9 @@ def lab_draft_path(draft_id: str):
 
 
 def load_lab_draft(draft_id: str) -> dict:
+    cloud_payload = load_cloud_json("lab_drafts", safe_lab_draft_id(draft_id))
+    if isinstance(cloud_payload, dict):
+        return cloud_payload
     path = lab_draft_path(draft_id)
     if not path.exists():
         return {}
@@ -413,6 +419,7 @@ def save_lab_draft(draft_id: str, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix(".tmp")
         payload = {**payload, "updated_at": datetime.now().isoformat(timespec="seconds")}
+        save_cloud_json("lab_drafts", safe_lab_draft_id(draft_id), payload)
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         os.replace(temp, path)
     except OSError:
@@ -455,6 +462,7 @@ if "lab_screenshot_candidate" not in st.session_state and loaded_lab_draft.get("
     st.session_state["lab_screenshot_candidate"] = loaded_lab_draft["candidate"]
 if loaded_lab_draft.get("updated_at"):
     st.caption(f"下書き自動保存: {loaded_lab_draft['updated_at']} / draft {lab_draft_id}")
+st.caption(f"保存先: {'Supabase + ローカル' if cloud_storage_enabled() else 'ローカル'}")
 
 profile = load_prediction_profile()
 journal = profile.get("betting_journal", {})

@@ -79,6 +79,115 @@ def data_path(path: str | Path) -> Path:
     return target
 
 
+def supabase_config() -> dict[str, str]:
+    """Return Supabase REST settings when cloud persistence is configured."""
+    url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "")).strip()
+    table = os.getenv("SUPABASE_TABLE", "kamino_store").strip() or "kamino_store"
+    enabled = bool(url and key)
+    return {"url": url, "key": key, "table": table, "enabled": enabled}
+
+
+def cloud_storage_enabled() -> bool:
+    return bool(supabase_config()["enabled"])
+
+
+def _supabase_headers(prefer: str = "") -> dict[str, str]:
+    config = supabase_config()
+    headers = {
+        "apikey": config["key"],
+        "Authorization": f"Bearer {config['key']}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def save_cloud_json(scope: str, key: str, payload: dict) -> bool:
+    """Persist a JSON payload to Supabase when configured.
+
+    The app always keeps the local JSON fallback.  Cloud errors therefore return
+    False instead of stopping the prediction workflow.
+    """
+    config = supabase_config()
+    if not config["enabled"] or not scope or not key:
+        return False
+    try:
+        import requests
+        endpoint = f'{config["url"]}/rest/v1/{config["table"]}'
+        body = {
+            "scope": str(scope),
+            "key": str(key),
+            "payload": payload,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        response = requests.post(
+            endpoint,
+            params={"on_conflict": "scope,key"},
+            headers=_supabase_headers("resolution=merge-duplicates,return=minimal"),
+            data=json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"),
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+def load_cloud_json(scope: str, key: str) -> dict | None:
+    config = supabase_config()
+    if not config["enabled"] or not scope or not key:
+        return None
+    try:
+        import requests
+        endpoint = f'{config["url"]}/rest/v1/{config["table"]}'
+        response = requests.get(
+            endpoint,
+            params={
+                "select": "payload,updated_at",
+                "scope": f"eq.{scope}",
+                "key": f"eq.{key}",
+                "limit": "1",
+            },
+            headers=_supabase_headers(),
+            timeout=10,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if rows and isinstance(rows[0].get("payload"), dict):
+            payload = rows[0]["payload"]
+            if rows[0].get("updated_at") and "updated_at" not in payload:
+                payload["updated_at"] = rows[0]["updated_at"]
+            return payload
+    except Exception:
+        return None
+    return None
+
+
+def list_cloud_json(scope: str, prefix: str = "", limit: int = 50) -> list[dict]:
+    config = supabase_config()
+    if not config["enabled"] or not scope:
+        return []
+    try:
+        import requests
+        endpoint = f'{config["url"]}/rest/v1/{config["table"]}'
+        params = {
+            "select": "key,payload,updated_at",
+            "scope": f"eq.{scope}",
+            "order": "updated_at.desc",
+            "limit": str(max(1, min(int(limit), 500))),
+        }
+        if prefix:
+            params["key"] = f"like.{prefix}%"
+        response = requests.get(endpoint, params=params, headers=_supabase_headers(), timeout=10)
+        response.raise_for_status()
+        rows = response.json()
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
+
 def new_state() -> dict[str, Any]:
     return {
         "race_info": {k: "" for k in ["日付", "競馬場", "開催回", "開催日", "レース番号", "レース名", "芝/ダート", "距離", "馬場", "天候", "頭数", "発走時刻"]},
@@ -385,13 +494,19 @@ def load_prediction_profile(path: str = "data/prediction_profile.json") -> dict:
         "patterns": [],
     }
     default = {"policy": "", "adjustments": {k: 0.0 for k in SCORE_KEYS}, "learning_samples": 0, "result_learning": default_result_learning, "betting_journal": default_betting_journal, "updated_at": ""}
-    if not profile_path.exists(): return default
-    try:
-        loaded = json.loads(profile_path.read_text(encoding="utf-8"))
+    def merged_profile(loaded: dict) -> dict:
         result_learning = {**default_result_learning, **loaded.get("result_learning", {})}
         result_learning["category_signals"] = {**default_result_learning["category_signals"], **result_learning.get("category_signals", {})}
         betting_journal = {**default_betting_journal, **loaded.get("betting_journal", {})}
         return {**default, **loaded, "adjustments": {**default["adjustments"], **loaded.get("adjustments", {})}, "result_learning": result_learning, "betting_journal": betting_journal}
+    if str(path) == "data/prediction_profile.json":
+        cloud_profile = load_cloud_json("profile", "prediction_profile")
+        if isinstance(cloud_profile, dict):
+            return merged_profile(cloud_profile)
+    if not profile_path.exists(): return default
+    try:
+        loaded = json.loads(profile_path.read_text(encoding="utf-8"))
+        return merged_profile(loaded)
     except Exception: return default
 
 
@@ -400,6 +515,8 @@ def save_prediction_profile(policy: str, path: str = "data/prediction_profile.js
     current = load_prediction_profile(path)
     current.update({"policy": policy.strip(), "updated_at": datetime.now().isoformat()})
     profile_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    if str(path) == "data/prediction_profile.json":
+        save_cloud_json("profile", "prediction_profile", current)
     return profile_path
 
 
@@ -421,6 +538,8 @@ def learn_prediction_adjustments(ai_scores: dict, final_scores: dict, path: str 
     profile["learning_samples"] = new_count; profile["updated_at"] = datetime.now().isoformat()
     profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    if str(path) == "data/prediction_profile.json":
+        save_cloud_json("profile", "prediction_profile", profile)
     return profile
 
 
@@ -527,6 +646,8 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
     profile["updated_at"] = datetime.now().isoformat()
     profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    if str(path) == "data/prediction_profile.json":
+        save_cloud_json("profile", "prediction_profile", profile)
     return profile
 
 
@@ -754,6 +875,8 @@ def learn_from_race_result(state: dict, feedback: dict, path: str = "data/predic
     profile["result_learning"] = learning; profile["updated_at"] = datetime.now().isoformat()
     profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    if str(path) == "data/prediction_profile.json":
+        save_cloud_json("profile", "prediction_profile", profile)
     return profile
 
 
@@ -929,11 +1052,18 @@ def save_layout_profile(name: str, race_header: list[float], horse_table: list[f
     temp = target.with_suffix(".tmp")
     temp.write_text(json.dumps(profiles, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, target)
+    if str(path) == "data/layout_profiles.json":
+        save_cloud_json("settings", "layout_profiles", profiles)
     return profile
 
 
 def load_layout_profiles(path: str = "data/layout_profiles.json") -> dict[str, dict]:
     profiles = {DEFAULT_LAYOUT_PROFILE["name"]: deepcopy(DEFAULT_LAYOUT_PROFILE)}
+    if str(path) == "data/layout_profiles.json":
+        saved_cloud = load_cloud_json("settings", "layout_profiles")
+        if isinstance(saved_cloud, dict):
+            profiles.update(saved_cloud)
+            return profiles
     target = data_path(path)
     if target.exists():
         try:
@@ -2364,6 +2494,8 @@ def save_json(state: dict, root: str = "data/races") -> Path:
     path = root_path / f"{slug}.json"; temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     os.replace(temp, path)
+    if root == "data/races":
+        save_cloud_json("races", f"{slug}.json", state)
     return path
 
 
@@ -2381,6 +2513,8 @@ def archive_prediction(state: dict, label: str = "", root: str = "data/predictio
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     os.replace(temp, path)
+    if root == "data/predictions":
+        save_cloud_json("predictions", path.name, snapshot)
     return path
 
 
@@ -2391,8 +2525,22 @@ def list_predictions(root: str = "data/predictions", limit: int = 50) -> list[di
     avoids slow reruns while still making recent predictions easy to reopen.
     """
     result = []
+    seen: set[str] = set()
+    if root == "data/predictions":
+        for row in list_cloud_json("predictions", limit=limit):
+            payload = row.get("payload") if isinstance(row, dict) else {}
+            if not isinstance(payload, dict):
+                continue
+            key = str(row.get("key", ""))
+            meta = payload.get("prediction_meta", {})
+            result.append({"path": f"supabase://predictions/{key}", "title": meta.get("title", Path(key).stem), "saved_at": meta.get("saved_at", row.get("updated_at", ""))})
+            seen.add(key)
+            if len(result) >= limit:
+                return result
     root_path = data_path(root)
     for path in sorted(root_path.glob("*.json"), reverse=True) if root_path.exists() else []:
+        if path.name in seen:
+            continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             meta = data.get("prediction_meta", {})
@@ -2405,6 +2553,14 @@ def list_predictions(root: str = "data/predictions", limit: int = 50) -> list[di
 
 
 def load_json(path) -> dict:
+    path_text = str(path)
+    if path_text.startswith("supabase://"):
+        _, location = path_text.split("://", 1)
+        scope, key = location.split("/", 1)
+        payload = load_cloud_json(scope, key)
+        if isinstance(payload, dict):
+            return payload
+        raise FileNotFoundError(f"Supabase上のデータを読み込めませんでした: {path_text}")
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
