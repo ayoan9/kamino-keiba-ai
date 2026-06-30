@@ -17,6 +17,7 @@ from horse_ai.core import (
     add_betting_journal_entry,
     betting_journal_entries,
     cloud_storage_enabled,
+    cloud_storage_status,
     data_path,
     extract_netkeiba_race_table_image_with_tesseract,
     extract_screenshot_with_macos_vision,
@@ -462,7 +463,10 @@ if "lab_screenshot_candidate" not in st.session_state and loaded_lab_draft.get("
     st.session_state["lab_screenshot_candidate"] = loaded_lab_draft["candidate"]
 if loaded_lab_draft.get("updated_at"):
     st.caption(f"下書き自動保存: {loaded_lab_draft['updated_at']} / draft {lab_draft_id}")
+lab_cloud_status = cloud_storage_status()
 st.caption(f"保存先: {'Supabase + ローカル' if cloud_storage_enabled() else 'ローカル'}")
+if not lab_cloud_status["enabled"]:
+    st.caption("Supabase設定: " + " / ".join(lab_cloud_status["missing"]) + " が未設定")
 
 profile = load_prediction_profile()
 journal = profile.get("betting_journal", {})

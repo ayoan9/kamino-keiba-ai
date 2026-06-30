@@ -24,7 +24,7 @@ from horse_ai.core import (
     extract_media_with_openai, extract_screenshot_with_macos_vision,
     extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
-    cloud_storage_enabled, data_path, load_cloud_json, load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
+    cloud_storage_enabled, cloud_storage_status, data_path, load_cloud_json, load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
     fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
     save_cloud_json, save_layout_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
 )
@@ -463,6 +463,11 @@ with st.sidebar:
             st.caption("自動一時保存: 有効")
         storage_label = st.session_state.get("draft_storage") or ("Supabase待機" if cloud_storage_enabled() else "ローカル")
         st.caption(f"保存先: {storage_label}")
+        cloud_status = cloud_storage_status()
+        if not cloud_status["enabled"]:
+            st.caption("Supabase設定: " + " / ".join(cloud_status["missing"]) + " が未設定")
+        else:
+            st.caption(f"Supabase設定: 有効（table: {cloud_status['table']}）")
         st.caption("ブラウザを閉じても、同じURLを開くと作業途中から再開できます。")
         if st.session_state.get("draft_save_error"):
             st.warning(f'一時保存エラー: {st.session_state["draft_save_error"]}')

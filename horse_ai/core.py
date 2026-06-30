@@ -81,8 +81,17 @@ def data_path(path: str | Path) -> Path:
 
 def supabase_config() -> dict[str, str]:
     """Return Supabase REST settings when cloud persistence is configured."""
-    url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
-    key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "")).strip()
+    url = (
+        os.getenv("SUPABASE_URL", "")
+        or os.getenv("SUPABASE_PROJECT_URL", "")
+        or os.getenv("SUPABASE_REST_URL", "")
+    ).strip().rstrip("/")
+    key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+        or os.getenv("SUPABASE_SERVICE_KEY", "")
+        or os.getenv("SUPABASE_SECRET_KEY", "")
+        or os.getenv("SUPABASE_ANON_KEY", "")
+    ).strip()
     table = os.getenv("SUPABASE_TABLE", "kamino_store").strip() or "kamino_store"
     enabled = bool(url and key)
     return {"url": url, "key": key, "table": table, "enabled": enabled}
@@ -90,6 +99,22 @@ def supabase_config() -> dict[str, str]:
 
 def cloud_storage_enabled() -> bool:
     return bool(supabase_config()["enabled"])
+
+
+def cloud_storage_status() -> dict[str, Any]:
+    config = supabase_config()
+    missing = []
+    if not config["url"]:
+        missing.append("SUPABASE_URL")
+    if not config["key"]:
+        missing.append("SUPABASE_SERVICE_ROLE_KEY")
+    return {
+        "enabled": bool(config["enabled"]),
+        "table": config["table"],
+        "missing": missing,
+        "url_set": bool(config["url"]),
+        "key_set": bool(config["key"]),
+    }
 
 
 def _supabase_headers(prefer: str = "") -> dict[str, str]:
