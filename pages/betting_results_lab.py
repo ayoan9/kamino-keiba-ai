@@ -5,6 +5,7 @@ import io
 import os
 import re
 from datetime import datetime
+from itertools import combinations, permutations
 
 import pandas as pd
 import streamlit as st
@@ -288,24 +289,87 @@ def compact_horse_number(label: str) -> str:
     return match.group(1) if match else ""
 
 
+def unique_numbers(values: list[str]) -> list[str]:
+    numbers = [compact_horse_number(value) for value in values]
+    return list(dict.fromkeys(number for number in numbers if number))
+
+
+def combo_text(ticket: str, numbers: tuple[str, ...] | list[str]) -> str:
+    separator = "→" if ticket in {"馬単", "3連単"} else "-"
+    return separator.join(numbers)
+
+
+def expand_bet_combos(ticket: str, method: str, axis1: str, axis2: str, opponents: list[str]) -> list[tuple[str, ...]]:
+    axis = unique_numbers([axis1, axis2])
+    opponents = [number for number in unique_numbers(opponents) if number not in axis]
+    selected = unique_numbers(axis + opponents)
+    if not ticket or not method:
+        return []
+    if ticket in {"単勝", "複勝"}:
+        return [(number,) for number in selected]
+    if ticket in {"枠連", "ワイド", "馬連"}:
+        if method == "ボックス":
+            return list(combinations(selected, 2))
+        if method in {"軸流し", "通常"} and axis:
+            return [tuple(sorted((a, b), key=int)) for a in axis for b in opponents]
+        return list(combinations(selected[:2], 2)) if len(selected) >= 2 else []
+    if ticket == "馬単":
+        if method == "ボックス":
+            return list(permutations(selected, 2))
+        if method in {"マルチ", "軸流しマルチ"} and axis:
+            return [(a, b) for a in axis for b in opponents] + [(b, a) for a in axis for b in opponents]
+        if method in {"軸流し", "通常"} and axis:
+            return [(a, b) for a in axis for b in opponents]
+        return [tuple(selected[:2])] if len(selected) >= 2 else []
+    if ticket == "3連複":
+        if method == "ボックス":
+            return list(combinations(selected, 3))
+        if method in {"軸流し", "通常"} and len(axis) >= 2:
+            return [tuple(sorted((axis[0], axis[1], b), key=int)) for b in opponents]
+        if method in {"軸流し", "通常"} and len(axis) == 1:
+            return [tuple(sorted((axis[0], b, c), key=int)) for b, c in combinations(opponents, 2)]
+        return list(combinations(selected[:3], 3)) if len(selected) >= 3 else []
+    if ticket == "3連単":
+        if method == "ボックス":
+            return list(permutations(selected, 3))
+        if method in {"マルチ", "軸流しマルチ"} and len(axis) >= 2:
+            combos: list[tuple[str, ...]] = []
+            for b in opponents:
+                combos.extend(permutations([axis[0], axis[1], b], 3))
+            return combos
+        if method in {"マルチ", "軸流しマルチ"} and len(axis) == 1:
+            combos: list[tuple[str, ...]] = []
+            for b, c in combinations(opponents, 2):
+                combos.extend(permutations([axis[0], b, c], 3))
+            return combos
+        if method in {"軸流し", "通常"} and len(axis) >= 2:
+            return [(axis[0], axis[1], b) for b in opponents]
+        if method in {"軸流し", "通常"} and len(axis) == 1:
+            return [(axis[0], b, c) for b, c in permutations(opponents, 2)]
+        return [tuple(selected[:3])] if len(selected) >= 3 else []
+    return []
+
+
 def build_bet_lines(rows: list[dict]) -> tuple[str, int, list[str]]:
     lines: list[str] = []
     ticket_types: list[str] = []
     total = 0
     for row in rows:
         ticket = str(row.get("券種", "") or "").strip()
-        stake = int(row.get("金額", 0) or 0)
+        method = str(row.get("買い方", "") or "通常").strip() or "通常"
+        stake = to_int(row.get("1点金額", row.get("金額", 0)))
         if not ticket or stake <= 0:
             continue
-        selected = [compact_horse_number(row.get(key, "")) for key in ("馬1", "馬2", "馬3")]
-        selected = [x for x in selected if x]
-        required = 1 if ticket in {"単勝", "複勝"} else 2 if ticket in {"枠連", "ワイド", "馬連", "馬単"} else 3
-        if len(selected) < required:
+        opponents = [row.get(key, "") for key in ("相手1", "相手2", "相手3", "相手4", "相手5")]
+        combos = expand_bet_combos(ticket, method, str(row.get("軸1", "") or ""), str(row.get("軸2", "") or ""), opponents)
+        combos = list(dict.fromkeys(combos))
+        if not combos:
             continue
-        combo = "-".join(selected[:required])
-        lines.append(f"{ticket} {combo} {stake:,}円")
+        combo_lines = [f"{ticket} {combo_text(ticket, combo)} {stake:,}円" for combo in combos]
+        header = f"【{ticket} {method}】{len(combos)}点 / 1点{stake:,}円"
+        lines.append(header + "\n" + "\n".join(combo_lines))
         ticket_types.append(ticket)
-        total += stake
+        total += stake * len(combos)
     return "\n".join(lines), total, sorted(set(ticket_types))
 
 
@@ -397,9 +461,10 @@ with tabs[0]:
         horse_options = horse_choices_from_text(candidate_horses, horses)
 
         st.markdown("#### 2. 買い目を選択")
+        st.caption("軸流し・マルチ・ボックスは自動で買い目に展開します。金額は1点あたりの購入額として入力してください。")
         default_rows = pd.DataFrame([
-            {"券種": "", "馬1": "", "馬2": "", "馬3": "", "金額": 0}
-            for _ in range(8)
+            {"券種": "", "買い方": "通常", "軸1": "", "軸2": "", "相手1": "", "相手2": "", "相手3": "", "相手4": "", "相手5": "", "1点金額": 0}
+            for _ in range(6)
         ])
         bet_df = st.data_editor(
             default_rows,
@@ -408,10 +473,15 @@ with tabs[0]:
             num_rows="dynamic",
             column_config={
                 "券種": st.column_config.SelectboxColumn(options=["", "単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単"]),
-                "馬1": st.column_config.SelectboxColumn(options=horse_options),
-                "馬2": st.column_config.SelectboxColumn(options=horse_options),
-                "馬3": st.column_config.SelectboxColumn(options=horse_options),
-                "金額": st.column_config.NumberColumn(min_value=0, step=100, format="%d円"),
+                "買い方": st.column_config.SelectboxColumn(options=["通常", "軸流し", "軸流しマルチ", "マルチ", "ボックス"]),
+                "軸1": st.column_config.SelectboxColumn(options=horse_options),
+                "軸2": st.column_config.SelectboxColumn(options=horse_options),
+                "相手1": st.column_config.SelectboxColumn(options=horse_options),
+                "相手2": st.column_config.SelectboxColumn(options=horse_options),
+                "相手3": st.column_config.SelectboxColumn(options=horse_options),
+                "相手4": st.column_config.SelectboxColumn(options=horse_options),
+                "相手5": st.column_config.SelectboxColumn(options=horse_options),
+                "1点金額": st.column_config.NumberColumn(min_value=0, step=100, format="%d円"),
             },
             key="candidate_bet_builder",
         )
@@ -436,9 +506,9 @@ with tabs[0]:
         with p2:
             pace_number = st.text_input("ペース具体数字", placeholder="例）前半5F 59.0 / +0.8", key="pace_number")
         with p3:
-            track_condition = st.selectbox("馬場", ["未入力", "良", "稍重", "重", "不良", "高速", "時計かかる", "内有利", "外有利"], key="track_condition")
+            track_condition = st.multiselect("馬場", ["良", "稍重", "重", "不良", "高速", "時計かかる", "内有利", "外有利", "フラット", "荒れ馬場"], key="track_condition")
         with p4:
-            race_shape = st.selectbox("展開", ["未入力", "逃げ残り", "先行有利", "差し有利", "追込有利", "内前有利", "外差し", "隊列縦長", "団子"], key="race_shape")
+            race_shape = st.multiselect("展開", ["逃げ残り", "先行有利", "差し有利", "追込有利", "内前有利", "外差し", "隊列縦長", "団子", "スロー瞬発戦", "持続力戦", "消耗戦"], key="race_shape")
 
         st.markdown("#### 4. 振り返りを構造化")
         bought_reason = st.multiselect(
@@ -467,8 +537,8 @@ with tabs[0]:
             ] if part),
             f"馬券結果: {hit_status}",
             f"ペース: {pace_type}" + (f"（{pace_number}）" if pace_number else ""),
-            f"馬場: {track_condition}",
-            f"展開: {race_shape}",
+            "馬場: " + (joined_selected(track_condition) if track_condition else "未入力"),
+            "展開: " + (joined_selected(race_shape) if race_shape else "未入力"),
         ]
         structured_review = "\n".join(part for part in [
             "買った理由: " + joined_selected(bought_reason) if bought_reason else "",
