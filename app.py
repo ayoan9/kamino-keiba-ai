@@ -11,6 +11,7 @@ import sys
 import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
+from itertools import combinations, permutations
 from pathlib import Path
 
 import pandas as pd
@@ -338,6 +339,167 @@ def progress_step(progress, percent: int, message: str):
 
 def _lap_format(value) -> str:
     return f"{value}秒" if value not in ("", None) else "－"
+
+
+def _to_int(value, default: int = 0) -> int:
+    try:
+        return int(float(str(value or "").replace(",", "").replace("円", "").strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def option_index(options: list, value) -> int:
+    try:
+        return options.index(value)
+    except ValueError:
+        return 0
+
+
+def horse_option_label(horse: dict) -> str:
+    no = str(horse.get("馬番", "")).strip()
+    name = str(horse.get("馬名", "")).strip()
+    return f"{no} {name}".strip() if no or name else ""
+
+
+def horse_no_from_option(value: str) -> str:
+    match = re.match(r"\s*(\d{1,2})", str(value or ""))
+    return match.group(1) if match else ""
+
+
+def _bet_lookup_key(ticket: str, combo: tuple[str, ...]) -> str:
+    unordered = {"枠連", "馬連", "ワイド", "3連複"}
+    values = [str(int(float(x))) if re.fullmatch(r"\d+(?:\.0+)?", str(x)) else str(x) for x in combo]
+    if ticket in unordered:
+        values = sorted(values, key=lambda x: int(x) if x.isdigit() else x)
+    return f"{ticket} {'-'.join(values)}"
+
+
+def expand_manual_bet_combos(ticket: str, method: str, axis1: str, axis2: str, opponents: list[str]) -> list[tuple[str, ...]]:
+    axis = [x for x in [axis1, axis2] if x]
+    opponents = [x for x in opponents if x and x not in axis]
+    selected = list(dict.fromkeys(axis + opponents))
+    if ticket in {"単勝", "複勝"}:
+        return [(n,) for n in selected]
+    if ticket in {"枠連", "ワイド", "馬連"}:
+        if method == "ボックス":
+            return list(combinations(selected, 2))
+        if method in {"軸流し", "通常"} and axis:
+            return [tuple(sorted((a, b), key=int)) for a in axis for b in opponents]
+        return list(combinations(selected[:2], 2)) if len(selected) >= 2 else []
+    if ticket == "馬単":
+        if method == "ボックス":
+            return list(permutations(selected, 2))
+        if method in {"マルチ", "軸流しマルチ"} and axis:
+            return [(a, b) for a in axis for b in opponents] + [(b, a) for a in axis for b in opponents]
+        if method in {"軸流し", "通常"} and axis:
+            return [(a, b) for a in axis for b in opponents]
+        return [tuple(selected[:2])] if len(selected) >= 2 else []
+    if ticket == "3連複":
+        if method == "ボックス":
+            return list(combinations(selected, 3))
+        if method in {"軸流し", "通常"} and len(axis) >= 2:
+            return [tuple(sorted((axis[0], axis[1], b), key=int)) for b in opponents]
+        if method in {"軸流し", "通常"} and len(axis) == 1:
+            return [tuple(sorted((axis[0], b, c), key=int)) for b, c in combinations(opponents, 2)]
+        return list(combinations(selected[:3], 3)) if len(selected) >= 3 else []
+    if ticket == "3連単":
+        if method == "ボックス":
+            return list(permutations(selected, 3))
+        if method in {"マルチ", "軸流しマルチ"} and len(axis) >= 2:
+            combos: list[tuple[str, ...]] = []
+            for b in opponents:
+                combos.extend(permutations([axis[0], axis[1], b], 3))
+            return combos
+        if method in {"マルチ", "軸流しマルチ"} and len(axis) == 1:
+            combos: list[tuple[str, ...]] = []
+            for b, c in combinations(opponents, 2):
+                combos.extend(permutations([axis[0], b, c], 3))
+            return combos
+        if method in {"軸流し", "通常"} and len(axis) >= 2:
+            return [(axis[0], axis[1], b) for b in opponents]
+        if method in {"軸流し", "通常"} and len(axis) == 1:
+            return [(axis[0], b, c) for b, c in permutations(opponents, 2)]
+        return [tuple(selected[:3])] if len(selected) >= 3 else []
+    return []
+
+
+def _manual_estimated_odds(ticket: str, combo: tuple[str, ...], score_rows: list[dict], frame_to_no: dict[str, str]) -> float:
+    by_no = {str(row.get("馬番", "")): row for row in score_rows}
+    numbers = [frame_to_no.get(n, n) for n in combo] if ticket == "枠連" else list(combo)
+    singles = []
+    for no in numbers:
+        row = by_no.get(str(no), {})
+        try:
+            single_odd = float(str(row.get("単勝オッズ") or 8.0).replace(",", ""))
+        except (TypeError, ValueError):
+            single_odd = 8.0
+        singles.append(max(1.1, single_odd))
+    powers = {"単勝": 1.0, "複勝": .42, "枠連": .48, "馬連": .58, "ワイド": .40, "馬単": .72, "3連複": .72, "3連単": .96}
+    discounts = {"単勝": 1.0, "複勝": .72, "枠連": .82, "馬連": .90, "ワイド": .70, "馬単": 1.05, "3連複": 1.15, "3連単": 1.35}
+    product = 1.0
+    for odd in singles:
+        product *= odd
+    return max(1.1, product ** powers.get(ticket, .5) * discounts.get(ticket, 1.0))
+
+
+def manual_bets_from_rows(rows: list[dict], race_state: dict, odds_map: dict[str, float], min_odds: float) -> tuple[list[dict], list[dict], int]:
+    output: list[dict] = []
+    skipped: list[dict] = []
+    total = 0
+    frame_by_no = {str(h.get("馬番", "")): str(h.get("枠番") or h.get("馬番", "")) for h in race_state.get("horses", [])}
+    frame_to_no = {}
+    for no, frame in frame_by_no.items():
+        frame_to_no.setdefault(frame, no)
+    for row in rows:
+        ticket = str(row.get("券種", "") or "").strip()
+        stake = _to_int(row.get("1点金額", 0))
+        method = str(row.get("買い方", "通常") or "通常")
+        if not ticket or stake <= 0:
+            continue
+        axis1 = horse_no_from_option(row.get("軸1", ""))
+        axis2 = horse_no_from_option(row.get("軸2", ""))
+        opponents = [horse_no_from_option(row.get(key, "")) for key in ("相手1", "相手2", "相手3", "相手4", "相手5")]
+        combos = expand_manual_bet_combos(ticket, method, axis1, axis2, opponents)
+        if ticket == "枠連":
+            combos = [tuple(frame_by_no.get(n, n) for n in combo) for combo in combos]
+        combos = list(dict.fromkeys(combos))
+        for combo in combos:
+            key = _bet_lookup_key(ticket, combo)
+            has_live = key in odds_map
+            odds = float(odds_map.get(key, _manual_estimated_odds(ticket, combo, race_state.get("score_results", []), frame_to_no)))
+            item = {
+                "買い目": key, "券種": ticket, "買い目スコア": 0,
+                "現在オッズ": round(odds, 2), "オッズ区分": "取得値" if has_live else "推定値",
+                "的中期待度": 0, "回収期待指数": 0,
+                "推奨購入金額": stake, "想定払戻": int(stake * odds), "想定利益": int(stake * odds) - stake,
+                "狙い": f"手動調整: {ticket} {method}", "見送り理由": "",
+            }
+            if odds < min_odds:
+                skipped.append({**item, "見送り理由": f"最低買いオッズ{min_odds:.1f}未満"})
+            else:
+                output.append(item)
+                total += stake
+    return output, skipped, total
+
+
+def bet_to_manual_row(bet: dict, horses: list[dict]) -> dict:
+    labels = {str(h.get("馬番", "")): horse_option_label(h) for h in horses}
+    ticket = str(bet.get("券種", "") or "")
+    raw = str(bet.get("買い目", "") or "").replace(ticket, "").strip()
+    nums = re.findall(r"\d{1,2}", raw)
+    values = [labels.get(n, n) for n in nums]
+    return {
+        "券種": ticket,
+        "買い方": "通常",
+        "軸1": values[0] if len(values) > 0 else "",
+        "軸2": values[1] if len(values) > 2 else "",
+        "相手1": values[1] if len(values) == 2 else values[2] if len(values) > 2 else "",
+        "相手2": "",
+        "相手3": "",
+        "相手4": "",
+        "相手5": "",
+        "1点金額": _to_int(bet.get("推奨購入金額", 0)),
+    }
 
 
 def _race_datetime(offset_minutes: int = 0) -> datetime:
@@ -950,6 +1112,76 @@ def step5():
             race["selected_bet_plan"] = selected_name
             race["bets"], race["skipped_bets"] = selected_plan["bets"], selected_plan["skipped"]
             persist(f"{selected_name}を採用しました"); st.rerun()
+    with st.expander("買い目を選択式で手動調整する", expanded=bool(race.get("manual_bet_rows"))):
+        st.caption("AI案をベースに、軸流し・マルチ・ボックスなどを選ぶだけで最終買い目を調整できます。金額は1点あたりです。")
+        horse_options = [""] + [horse_option_label(h) for h in race.get("horses", []) if horse_option_label(h)]
+        ticket_options = ["", "単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単"]
+        method_options = ["通常", "軸流し", "軸流しマルチ", "マルチ", "ボックス"]
+        if st.button("AI案を手動調整欄にコピー", disabled=not bool(race.get("bets")), icon=":material/content_copy:"):
+            race["manual_bet_rows"] = [bet_to_manual_row(bet, race.get("horses", [])) for bet in race.get("bets", [])[:5]]
+            persist("AI案を手動調整欄へコピーしました")
+            st.rerun()
+        saved_manual_rows = race.get("manual_bet_rows", []) if isinstance(race.get("manual_bet_rows", []), list) else []
+        manual_count = st.number_input("買い方の行数", min_value=1, max_value=5, value=min(5, max(1, len(saved_manual_rows) or 2)), step=1, key="manual_bet_count")
+        manual_rows: list[dict] = []
+        for idx in range(int(manual_count)):
+            saved = saved_manual_rows[idx] if idx < len(saved_manual_rows) and isinstance(saved_manual_rows[idx], dict) else {}
+            with st.container(border=True):
+                st.caption(f"手動買い方 {idx + 1}")
+                t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
+                with t1:
+                    ticket = st.selectbox("券種", ticket_options, index=option_index(ticket_options, saved.get("券種", "")), key=f"manual_ticket_{idx}")
+                with t2:
+                    method = st.selectbox("買い方", method_options, index=option_index(method_options, saved.get("買い方", "通常")), key=f"manual_method_{idx}")
+                with t3:
+                    axis1 = st.selectbox("軸1", horse_options, index=option_index(horse_options, saved.get("軸1", "")), key=f"manual_axis1_{idx}")
+                with t4:
+                    axis2 = st.selectbox("軸2", horse_options, index=option_index(horse_options, saved.get("軸2", "")), key=f"manual_axis2_{idx}")
+                o1, o2, o3, o4, o5, amount_col = st.columns([1, 1, 1, 1, 1, 1])
+                with o1:
+                    opponent1 = st.selectbox("相手1", horse_options, index=option_index(horse_options, saved.get("相手1", "")), key=f"manual_opp1_{idx}")
+                with o2:
+                    opponent2 = st.selectbox("相手2", horse_options, index=option_index(horse_options, saved.get("相手2", "")), key=f"manual_opp2_{idx}")
+                with o3:
+                    opponent3 = st.selectbox("相手3", horse_options, index=option_index(horse_options, saved.get("相手3", "")), key=f"manual_opp3_{idx}")
+                with o4:
+                    opponent4 = st.selectbox("相手4", horse_options, index=option_index(horse_options, saved.get("相手4", "")), key=f"manual_opp4_{idx}")
+                with o5:
+                    opponent5 = st.selectbox("相手5", horse_options, index=option_index(horse_options, saved.get("相手5", "")), key=f"manual_opp5_{idx}")
+                with amount_col:
+                    amount = st.number_input("1点金額", min_value=0, step=100, value=_to_int(saved.get("1点金額", 0)), key=f"manual_amount_{idx}")
+                manual_rows.append({
+                    "券種": ticket, "買い方": method, "軸1": axis1, "軸2": axis2,
+                    "相手1": opponent1, "相手2": opponent2, "相手3": opponent3, "相手4": opponent4, "相手5": opponent5,
+                    "1点金額": amount,
+                })
+        latest_odds = race["odds_history"][-1].get("odds", {}) if race.get("odds_history") else {}
+        manual_bets, manual_skipped, manual_total = manual_bets_from_rows(manual_rows, race, latest_odds, float(min_odds))
+        race["manual_bet_rows"] = manual_rows
+        c1, c2, c3 = st.columns(3)
+        c1.metric("手動買い目数", len(manual_bets))
+        c2.metric("手動配分合計", f"{manual_total:,}円")
+        c3.metric("予算差分", f"{int(budget) - manual_total:+,}円")
+        if manual_total > int(budget):
+            st.warning("購入予算を超えています。1点金額か買い方を調整してください。")
+        if manual_bets:
+            preview = pd.DataFrame([{
+                "券種": item["券種"],
+                "買い目": item["買い目"],
+                "金額": f'{int(item["推奨購入金額"]):,}円',
+                "想定配当": f'{float(item["現在オッズ"]):g}倍',
+                "想定払戻": f'{int(item["想定払戻"]):,}円',
+                "オッズ": item["オッズ区分"],
+            } for item in manual_bets])
+            st.dataframe(preview, hide_index=True, width="stretch")
+        if manual_skipped:
+            with st.expander("手動調整で見送りになる候補"):
+                st.dataframe(pd.DataFrame([{"買い目": item["買い目"], "理由": item["見送り理由"]} for item in manual_skipped]), hide_index=True)
+        if st.button("この手動調整を採用", type="primary", disabled=not manual_bets or manual_total > int(budget), icon=":material/tune:"):
+            race["selected_bet_plan"] = "手動調整"
+            race["bets"], race["skipped_bets"] = manual_bets, manual_skipped
+            persist("手動調整した買い目を保存しました")
+            st.rerun()
     if race["bets"]:
         total = sum(b["推奨購入金額"] for b in race["bets"])
         a,b,c = st.columns(3); a.metric("採用プラン", race.get("selected_bet_plan", "AIおすすめ")); b.metric("配分合計", f"{total:,}円"); c.metric("買い目数", len(race["bets"]))
