@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
+import uuid
 from datetime import datetime
 from itertools import combinations, permutations
 
@@ -14,6 +16,7 @@ from horse_ai.core import (
     add_betting_journal_entries,
     add_betting_journal_entry,
     betting_journal_entries,
+    data_path,
     extract_netkeiba_race_table_image_with_tesseract,
     extract_screenshot_with_macos_vision,
     load_prediction_profile,
@@ -377,6 +380,52 @@ def joined_selected(values: list[str]) -> str:
     return "、".join(str(v) for v in values if str(v).strip())
 
 
+def safe_lab_draft_id(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "", str(value or ""))[:64]
+
+
+def current_lab_draft_id() -> str:
+    draft_id = safe_lab_draft_id(st.query_params.get("lab_draft", ""))
+    if not draft_id:
+        draft_id = uuid.uuid4().hex[:12]
+        st.query_params["view"] = "lab"
+        st.query_params["lab_draft"] = draft_id
+    return draft_id
+
+
+def lab_draft_path(draft_id: str):
+    return data_path("data/lab_drafts") / f"{safe_lab_draft_id(draft_id)}.json"
+
+
+def load_lab_draft(draft_id: str) -> dict:
+    path = lab_draft_path(draft_id)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_lab_draft(draft_id: str, payload: dict) -> None:
+    try:
+        path = lab_draft_path(draft_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(".tmp")
+        payload = {**payload, "updated_at": datetime.now().isoformat(timespec="seconds")}
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        os.replace(temp, path)
+    except OSError:
+        pass
+
+
+def option_index(options: list, value) -> int:
+    try:
+        return options.index(value)
+    except ValueError:
+        return 0
+
+
 st.markdown(
     """
     <div class="lab-hero">
@@ -399,6 +448,13 @@ with nav_col2:
     st.markdown('<div class="lab-back">', unsafe_allow_html=True)
     st.link_button("予想画面へ戻る", "/", icon="🏇", width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
+
+lab_draft_id = current_lab_draft_id()
+loaded_lab_draft = load_lab_draft(lab_draft_id)
+if "lab_screenshot_candidate" not in st.session_state and loaded_lab_draft.get("candidate"):
+    st.session_state["lab_screenshot_candidate"] = loaded_lab_draft["candidate"]
+if loaded_lab_draft.get("updated_at"):
+    st.caption(f"下書き自動保存: {loaded_lab_draft['updated_at']} / draft {lab_draft_id}")
 
 profile = load_prediction_profile()
 journal = profile.get("betting_journal", {})
@@ -429,7 +485,10 @@ if section == "出馬表取込・選択入力":
         key="lab_race_screenshots",
     )
     if st.button("出馬表を読み取る", type="primary", disabled=not race_images):
+        progress = st.progress(0, text="出馬表を読み取る準備中（0%）")
+        progress.progress(20, text="画像を確認しています（20%）")
         race_info, horses, race_ocr, race_notes = extract_race_screenshots(race_images)
+        progress.progress(70, text="出走馬候補を整理しています（70%）")
         if not horses and race_ocr.strip():
             fallback_info, fallback_horses = parse_inputs({"レース情報": race_ocr, "出馬表": race_ocr, "過去走情報": "", "コメント": "", "任意メモ": ""})
             race_info.update({k: v for k, v in fallback_info.items() if v not in ("", None)})
@@ -441,9 +500,12 @@ if section == "出馬表取込・選択入力":
             "notes": race_notes,
             "ocr": race_ocr,
         }
+        save_lab_draft(lab_draft_id, {"candidate": st.session_state["lab_screenshot_candidate"]})
+        progress.progress(100, text="読み取り完了（100%）")
         st.rerun()
     candidate = st.session_state.get("lab_screenshot_candidate")
     if candidate:
+        draft_form = loaded_lab_draft.get("form", {}) if isinstance(loaded_lab_draft.get("form", {}), dict) else {}
         st.markdown("#### 1. レースと出走馬を確認")
         for note in candidate.get("notes", []):
             st.info(note)
@@ -453,42 +515,46 @@ if section == "出馬表取込・選択入力":
             candidate_race = st.text_input("レース", value=candidate.get("race_label", ""), key="candidate_race_label")
             candidate_horses = st.text_area("出走馬", value=candidate.get("horses_text", ""), height=150, key="candidate_horses")
         with c2:
-            source = st.selectbox("購入・記録元", ["netkeiba", "IPAT", "JRA", "他ツール", "手入力"], key="candidate_source")
-            candidate_return = st.number_input("払戻額", min_value=0, step=100, value=0, key="candidate_return")
+            source_options = ["netkeiba", "IPAT", "JRA", "他ツール", "手入力"]
+            source = st.selectbox("購入・記録元", source_options, index=option_index(source_options, draft_form.get("source", "netkeiba")), key="candidate_source")
+            candidate_return = st.number_input("払戻額", min_value=0, step=100, value=int(draft_form.get("return", 0) or 0), key="candidate_return")
             st.caption("出走馬の読み取りがズレた場合は、左の出走馬欄を直接直せます。買い目候補は下の選択肢から選びます。")
         horse_options = horse_choices_from_text(candidate_horses, horses)
 
         st.markdown("#### 2. 買い目を選択")
         st.caption("軸流し・マルチ・ボックスは自動で買い目に展開します。金額は1点あたりの購入額として入力してください。")
-        bet_count = st.number_input("買い方の行数", min_value=1, max_value=5, value=2, step=1, key="candidate_bet_count")
+        saved_bet_rows = draft_form.get("bet_rows", []) if isinstance(draft_form.get("bet_rows", []), list) else []
+        default_bet_count = min(5, max(1, len(saved_bet_rows) or 2))
+        bet_count = st.number_input("買い方の行数", min_value=1, max_value=5, value=default_bet_count, step=1, key="candidate_bet_count")
         bet_rows: list[dict] = []
         ticket_options = ["", "単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単"]
         method_options = ["通常", "軸流し", "軸流しマルチ", "マルチ", "ボックス"]
         for idx in range(int(bet_count)):
+            saved_row = saved_bet_rows[idx] if idx < len(saved_bet_rows) and isinstance(saved_bet_rows[idx], dict) else {}
             with st.container(border=True):
                 st.caption(f"買い方 {idx + 1}")
                 t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
                 with t1:
-                    ticket = st.selectbox("券種", ticket_options, key=f"candidate_ticket_{idx}")
+                    ticket = st.selectbox("券種", ticket_options, index=option_index(ticket_options, saved_row.get("券種", "")), key=f"candidate_ticket_{idx}")
                 with t2:
-                    method = st.selectbox("買い方", method_options, key=f"candidate_method_{idx}")
+                    method = st.selectbox("買い方", method_options, index=option_index(method_options, saved_row.get("買い方", "通常")), key=f"candidate_method_{idx}")
                 with t3:
-                    axis1 = st.selectbox("軸1", horse_options, key=f"candidate_axis1_{idx}")
+                    axis1 = st.selectbox("軸1", horse_options, index=option_index(horse_options, saved_row.get("軸1", "")), key=f"candidate_axis1_{idx}")
                 with t4:
-                    axis2 = st.selectbox("軸2", horse_options, key=f"candidate_axis2_{idx}")
+                    axis2 = st.selectbox("軸2", horse_options, index=option_index(horse_options, saved_row.get("軸2", "")), key=f"candidate_axis2_{idx}")
                 o1, o2, o3, o4, o5, amount_col = st.columns([1, 1, 1, 1, 1, 1])
                 with o1:
-                    opponent1 = st.selectbox("相手1", horse_options, key=f"candidate_opp1_{idx}")
+                    opponent1 = st.selectbox("相手1", horse_options, index=option_index(horse_options, saved_row.get("相手1", "")), key=f"candidate_opp1_{idx}")
                 with o2:
-                    opponent2 = st.selectbox("相手2", horse_options, key=f"candidate_opp2_{idx}")
+                    opponent2 = st.selectbox("相手2", horse_options, index=option_index(horse_options, saved_row.get("相手2", "")), key=f"candidate_opp2_{idx}")
                 with o3:
-                    opponent3 = st.selectbox("相手3", horse_options, key=f"candidate_opp3_{idx}")
+                    opponent3 = st.selectbox("相手3", horse_options, index=option_index(horse_options, saved_row.get("相手3", "")), key=f"candidate_opp3_{idx}")
                 with o4:
-                    opponent4 = st.selectbox("相手4", horse_options, key=f"candidate_opp4_{idx}")
+                    opponent4 = st.selectbox("相手4", horse_options, index=option_index(horse_options, saved_row.get("相手4", "")), key=f"candidate_opp4_{idx}")
                 with o5:
-                    opponent5 = st.selectbox("相手5", horse_options, key=f"candidate_opp5_{idx}")
+                    opponent5 = st.selectbox("相手5", horse_options, index=option_index(horse_options, saved_row.get("相手5", "")), key=f"candidate_opp5_{idx}")
                 with amount_col:
-                    amount = st.number_input("1点金額", min_value=0, step=100, value=0, key=f"candidate_amount_{idx}")
+                    amount = st.number_input("1点金額", min_value=0, step=100, value=to_int(saved_row.get("1点金額", 0)), key=f"candidate_amount_{idx}")
                 bet_rows.append({
                     "券種": ticket,
                     "買い方": method,
@@ -509,45 +575,54 @@ if section == "出馬表取込・選択入力":
         st.markdown("#### 3. 結果とレース質を選択")
         r1, r2, r3, r4 = st.columns(4)
         with r1:
-            first = st.selectbox("1着", horse_options, key="result_first")
+            first = st.selectbox("1着", horse_options, index=option_index(horse_options, draft_form.get("first", "")), key="result_first")
         with r2:
-            second = st.selectbox("2着", horse_options, key="result_second")
+            second = st.selectbox("2着", horse_options, index=option_index(horse_options, draft_form.get("second", "")), key="result_second")
         with r3:
-            third = st.selectbox("3着", horse_options, key="result_third")
+            third = st.selectbox("3着", horse_options, index=option_index(horse_options, draft_form.get("third", "")), key="result_third")
         with r4:
-            hit_status = st.selectbox("馬券結果", ["不的中", "的中", "トリガミ", "見送り"], key="hit_status")
+            hit_options = ["不的中", "的中", "トリガミ", "見送り"]
+            hit_status = st.selectbox("馬券結果", hit_options, index=option_index(hit_options, draft_form.get("hit_status", "不的中")), key="hit_status")
         p1, p2, p3, p4 = st.columns(4)
         with p1:
-            pace_type = st.radio("ペース", ["H", "M", "S"], horizontal=True, key="pace_type")
+            pace_options = ["H", "M", "S"]
+            pace_type = st.radio("ペース", pace_options, index=option_index(pace_options, draft_form.get("pace_type", "M")), horizontal=True, key="pace_type")
         with p2:
-            pace_first3f = st.text_input("前半3F", placeholder="例）34.8", key="pace_first3f")
+            pace_first3f = st.text_input("前半3F", value=str(draft_form.get("pace_first3f", "") or ""), placeholder="例）34.8", key="pace_first3f")
         with p3:
-            pace_first5f = st.text_input("前半5F", placeholder="例）59.0", key="pace_first5f")
+            pace_first5f = st.text_input("前半5F", value=str(draft_form.get("pace_first5f", "") or ""), placeholder="例）59.0", key="pace_first5f")
         with p4:
-            pace_last3f = st.text_input("後半3F", placeholder="例）35.6", key="pace_last3f")
+            pace_last3f = st.text_input("後半3F", value=str(draft_form.get("pace_last3f", "") or ""), placeholder="例）35.6", key="pace_last3f")
         b1, b2 = st.columns(2)
         with b1:
-            track_condition = st.multiselect("馬場", ["良", "稍重", "重", "不良", "高速", "時計かかる", "内有利", "外有利", "フラット", "荒れ馬場"], key="track_condition")
+            track_options = ["良", "稍重", "重", "不良", "高速", "時計かかる", "内有利", "外有利", "フラット", "荒れ馬場"]
+            track_condition = st.multiselect("馬場", track_options, default=[x for x in draft_form.get("track_condition", []) if x in track_options], key="track_condition")
         with b2:
-            race_shape = st.multiselect("展開", ["逃げ残り", "先行有利", "差し有利", "追込有利", "内前有利", "外差し", "隊列縦長", "団子", "スロー瞬発戦", "持続力戦", "消耗戦"], key="race_shape")
+            shape_options = ["逃げ残り", "先行有利", "差し有利", "追込有利", "内前有利", "外差し", "隊列縦長", "団子", "スロー瞬発戦", "持続力戦", "消耗戦"]
+            race_shape = st.multiselect("展開", shape_options, default=[x for x in draft_form.get("race_shape", []) if x in shape_options], key="race_shape")
 
         st.markdown("#### 4. 振り返りを構造化")
         bought_reason = st.multiselect(
             "買った理由",
             ["軸信頼", "相手妙味", "オッズ妙味", "展開利", "馬場適性", "コース適性", "状態良さそう", "騎手評価", "人気過小評価", "実績重視"],
+            default=[x for x in draft_form.get("bought_reason", []) if x in ["軸信頼", "相手妙味", "オッズ妙味", "展開利", "馬場適性", "コース適性", "状態良さそう", "騎手評価", "人気過小評価", "実績重視"]],
             key="bought_reason_tags",
         )
+        review_options = ["軸は良かった", "軸選びミス", "相手抜け", "買い目を広げすぎ", "買い目を絞りすぎ", "オッズ判断ミス", "展開読み違い", "馬場読み違い", "ペース読み違い", "状態評価ミス", "穴馬評価成功", "人気馬軽視成功"]
         review_tags = st.multiselect(
             "振り返りタグ",
-            ["軸は良かった", "軸選びミス", "相手抜け", "買い目を広げすぎ", "買い目を絞りすぎ", "オッズ判断ミス", "展開読み違い", "馬場読み違い", "ペース読み違い", "状態評価ミス", "穴馬評価成功", "人気馬軽視成功"],
+            review_options,
+            default=[x for x in draft_form.get("review_tags", []) if x in review_options],
             key="review_tags",
         )
+        lesson_options = ["軸の安定感を重視", "穴は相手まで", "展開利を強める", "馬場バイアスを強める", "オッズ妙味の下限を上げる", "点数を絞る", "三連系を控える", "ワイド中心にする", "人気馬の消しを慎重にする"]
         lesson_tags = st.multiselect(
             "次回に活かすこと",
-            ["軸の安定感を重視", "穴は相手まで", "展開利を強める", "馬場バイアスを強める", "オッズ妙味の下限を上げる", "点数を絞る", "三連系を控える", "ワイド中心にする", "人気馬の消しを慎重にする"],
+            lesson_options,
+            default=[x for x in draft_form.get("lesson_tags", []) if x in lesson_options],
             key="lesson_tags",
         )
-        free_review = st.text_area("自由メモ", height=100, placeholder="例）想定より流れて差し決着。軸は妥当だったが、相手を内前に寄せすぎた。", key="candidate_review")
+        free_review = st.text_area("自由メモ", value=str(draft_form.get("free_review", "") or ""), height=100, placeholder="例）想定より流れて差し決着。軸は妥当だったが、相手を内前に寄せすぎた。", key="candidate_review")
         with st.expander("OCR全文を確認"):
             st.text_area("OCR結果", candidate.get("ocr", ""), height=260)
         lap_summary = " / ".join(part for part in [
@@ -573,6 +648,37 @@ if section == "出馬表取込・選択入力":
             "自由メモ: " + free_review if free_review.strip() else "",
         ] if part)
         next_lesson = "次回への学び: " + joined_selected(lesson_tags) if lesson_tags else free_review
+        autosave_payload = {
+            "candidate": {
+                **candidate,
+                "race_label": candidate_race,
+                "horses_text": candidate_horses,
+            },
+            "form": {
+                "source": source,
+                "return": int(candidate_return),
+                "bet_rows": bet_rows,
+                "bets_text": candidate_bets,
+                "stake": int(candidate_stake),
+                "ticket_types": ticket_types,
+                "first": first,
+                "second": second,
+                "third": third,
+                "hit_status": hit_status,
+                "pace_type": pace_type,
+                "pace_first3f": pace_first3f,
+                "pace_first5f": pace_first5f,
+                "pace_last3f": pace_last3f,
+                "track_condition": track_condition,
+                "race_shape": race_shape,
+                "bought_reason": bought_reason,
+                "review_tags": review_tags,
+                "lesson_tags": lesson_tags,
+                "free_review": free_review,
+            },
+        }
+        save_lab_draft(lab_draft_id, autosave_payload)
+        st.caption("この入力内容は下書きとして自動保存されています。ブラウザを閉じても同じURLから再開できます。")
         can_save = bool(candidate_bets.strip() or structured_review.strip() or any([first, second, third]))
         if st.button("この内容で実績を保存", type="primary", disabled=not can_save):
             try:
@@ -591,6 +697,7 @@ if section == "出馬表取込・選択入力":
                     "登録日時": datetime.now().isoformat(timespec="seconds"),
                 })
                 st.success(f'保存しました。累計{updated.get("betting_journal", {}).get("count", 0)}件です。')
+                save_lab_draft(lab_draft_id, {})
                 del st.session_state["lab_screenshot_candidate"]
                 st.rerun()
             except Exception as exc:
@@ -601,18 +708,34 @@ if section == "手入力":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">1レースの実績を登録</div>', unsafe_allow_html=True)
     st.caption("細かい採点は不要です。出走馬・買い目・結果・振り返りだけ残せば十分です。")
-    race_label = st.text_input("レース", placeholder="例）2026-06-28 福島11R ラジオNIKKEI賞")
-    horses_text = st.text_area("出走馬", height=120, placeholder="例）5 ファイアンクランツ\n8 センツブラッド\n14 トータルクラリティ")
-    bets = st.text_area("買い目", height=120, placeholder="例）ワイド 5-8 1,000円\n馬連 5-8 500円")
+    manual_form = loaded_lab_draft.get("manual_form", {}) if isinstance(loaded_lab_draft.get("manual_form", {}), dict) else {}
+    race_label = st.text_input("レース", value=str(manual_form.get("race_label", "") or ""), placeholder="例）2026-06-28 福島11R ラジオNIKKEI賞")
+    horses_text = st.text_area("出走馬", value=str(manual_form.get("horses_text", "") or ""), height=120, placeholder="例）5 ファイアンクランツ\n8 センツブラッド\n14 トータルクラリティ")
+    bets = st.text_area("買い目", value=str(manual_form.get("bets", "") or ""), height=120, placeholder="例）ワイド 5-8 1,000円\n馬連 5-8 500円")
     c1, c2, c3 = st.columns(3)
     with c1:
-        source = st.selectbox("情報源", ["netkeiba", "IPAT", "JRA", "他ツール", "手入力"])
+        manual_source_options = ["netkeiba", "IPAT", "JRA", "他ツール", "手入力"]
+        source = st.selectbox("情報源", manual_source_options, index=option_index(manual_source_options, manual_form.get("source", "netkeiba")))
     with c2:
-        stake_input = st.number_input("購入額", min_value=0, step=100, value=0)
+        stake_input = st.number_input("購入額", min_value=0, step=100, value=to_int(manual_form.get("stake_input", 0)))
     with c3:
-        return_input = st.number_input("払戻額", min_value=0, step=100, value=0)
-    result = st.text_area("結果", height=90, placeholder="例）5番1着、8番4着。馬連は不的中。")
-    review = st.text_area("振り返り", height=120, placeholder="例）軸は良かったが、相手を人気寄りに寄せすぎた。道悪適性をもう少し重視したい。")
+        return_input = st.number_input("払戻額", min_value=0, step=100, value=to_int(manual_form.get("return_input", 0)))
+    result = st.text_area("結果", value=str(manual_form.get("result", "") or ""), height=90, placeholder="例）5番1着、8番4着。馬連は不的中。")
+    review = st.text_area("振り返り", value=str(manual_form.get("review", "") or ""), height=120, placeholder="例）軸は良かったが、相手を人気寄りに寄せすぎた。道悪適性をもう少し重視したい。")
+    save_lab_draft(lab_draft_id, {
+        **loaded_lab_draft,
+        "manual_form": {
+            "race_label": race_label,
+            "horses_text": horses_text,
+            "bets": bets,
+            "source": source,
+            "stake_input": int(stake_input),
+            "return_input": int(return_input),
+            "result": result,
+            "review": review,
+        },
+    })
+    st.caption("手入力の途中内容も自動保存されています。同じURLから再開できます。")
     if st.button("この実績を保存", type="primary"):
         try:
             updated = add_betting_journal_entry({
@@ -629,6 +752,7 @@ if section == "手入力":
                 "登録日時": datetime.now().isoformat(timespec="seconds"),
             })
             st.success(f'保存しました。累計{updated.get("betting_journal", {}).get("count", 0)}件です。')
+            save_lab_draft(lab_draft_id, {})
             st.rerun()
         except Exception as exc:
             st.error(f"保存できませんでした: {exc}")

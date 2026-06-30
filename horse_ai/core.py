@@ -48,6 +48,37 @@ DEFAULT_LAYOUT_PROFILE = {
 KEYCHAIN_SERVICE = "jp.kamino.keiba-ai.openai"
 
 
+def storage_root() -> Path:
+    """Return the writable data root, preferring persistent deployment storage.
+
+    Local development keeps using ./data.  On Render, mounting a persistent Disk
+    at /var/data makes the app store profiles, drafts, predictions, and race JSON
+    there automatically.  KAMINO_DATA_DIR can override both.
+    """
+    configured = os.getenv("KAMINO_DATA_DIR") or os.getenv("RENDER_DISK_PATH")
+    if configured:
+        return Path(configured)
+    render_disk = Path("/var/data")
+    if render_disk.exists() and os.access(render_disk, os.W_OK):
+        return render_disk
+    return Path("data")
+
+
+def data_path(path: str | Path) -> Path:
+    """Map default data/* paths to the active storage root.
+
+    Explicit paths outside data/ are respected so tests and caller-provided files
+    keep working unchanged.
+    """
+    target = Path(path)
+    if target.is_absolute():
+        return target
+    parts = target.parts
+    if parts and parts[0] == "data":
+        return storage_root().joinpath(*parts[1:])
+    return target
+
+
 def new_state() -> dict[str, Any]:
     return {
         "race_info": {k: "" for k in ["日付", "競馬場", "開催回", "開催日", "レース番号", "レース名", "芝/ダート", "距離", "馬場", "天候", "頭数", "発走時刻"]},
@@ -331,7 +362,7 @@ def evaluate_with_ollama(horses: list[dict], race_info: dict, model: str, predic
 
 
 def load_prediction_profile(path: str = "data/prediction_profile.json") -> dict:
-    profile_path = Path(path)
+    profile_path = data_path(path)
     default_result_learning = {
         "reviews": 0,
         "winner_rank_total": 0.0,
@@ -365,7 +396,7 @@ def load_prediction_profile(path: str = "data/prediction_profile.json") -> dict:
 
 
 def save_prediction_profile(policy: str, path: str = "data/prediction_profile.json") -> Path:
-    profile_path = Path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     current = load_prediction_profile(path)
     current.update({"policy": policy.strip(), "updated_at": datetime.now().isoformat()})
     profile_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -388,7 +419,7 @@ def learn_prediction_adjustments(ai_scores: dict, final_scores: dict, path: str 
             race_average = sum(diffs) / len(diffs)
             profile["adjustments"][key] = round((float(profile["adjustments"].get(key, 0)) * count + race_average) / new_count, 3)
     profile["learning_samples"] = new_count; profile["updated_at"] = datetime.now().isoformat()
-    profile_path = Path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
     return profile
 
@@ -494,7 +525,7 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
         journal["patterns"] = patterns[-40:]
     profile["betting_journal"] = journal
     profile["updated_at"] = datetime.now().isoformat()
-    profile_path = Path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
     return profile
 
@@ -721,7 +752,7 @@ def learn_from_race_result(state: dict, feedback: dict, path: str = "data/predic
     learning["lessons"] = learning["lessons"][-20:]
     learning.setdefault("reviewed_races", []).append(race_key); learning["reviewed_races"] = learning["reviewed_races"][-100:]
     profile["result_learning"] = learning; profile["updated_at"] = datetime.now().isoformat()
-    profile_path = Path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
     return profile
 
@@ -891,7 +922,7 @@ def _prepare_visual_inputs(files: list[tuple[str, str, bytes]], crop_profile: di
 
 
 def save_layout_profile(name: str, race_header: list[float], horse_table: list[float], path: str = "data/layout_profiles.json") -> dict:
-    target = Path(path); target.parent.mkdir(parents=True, exist_ok=True)
+    target = data_path(path); target.parent.mkdir(parents=True, exist_ok=True)
     profiles = load_layout_profiles(path)
     profile = {"name": name.strip() or "マイテンプレート", "race_header": race_header, "horse_table": horse_table}
     profiles[profile["name"]] = profile
@@ -903,7 +934,7 @@ def save_layout_profile(name: str, race_header: list[float], horse_table: list[f
 
 def load_layout_profiles(path: str = "data/layout_profiles.json") -> dict[str, dict]:
     profiles = {DEFAULT_LAYOUT_PROFILE["name"]: deepcopy(DEFAULT_LAYOUT_PROFILE)}
-    target = Path(path)
+    target = data_path(path)
     if target.exists():
         try:
             saved = json.loads(target.read_text(encoding="utf-8"))
@@ -2327,9 +2358,10 @@ def compare_odds(previous: dict[str, float], current: dict[str, float], min_odds
 
 
 def save_json(state: dict, root: str = "data/races") -> Path:
-    Path(root).mkdir(parents=True, exist_ok=True)
+    root_path = data_path(root)
+    root_path.mkdir(parents=True, exist_ok=True)
     info = state.get("race_info", {}); slug = re.sub(r"[^\w\-]+", "_", f"{info.get('日付','')}_{info.get('競馬場','')}_{info.get('レース番号','')}_{info.get('レース名','')}").strip("_") or datetime.now().strftime("race_%Y%m%d_%H%M%S")
-    path = Path(root) / f"{slug}.json"; temp = path.with_suffix(".tmp")
+    path = root_path / f"{slug}.json"; temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     os.replace(temp, path)
     return path
@@ -2337,12 +2369,13 @@ def save_json(state: dict, root: str = "data/races") -> Path:
 
 def archive_prediction(state: dict, label: str = "", root: str = "data/predictions") -> Path:
     """Create an immutable, user-selected prediction snapshot."""
-    Path(root).mkdir(parents=True, exist_ok=True)
+    root_path = data_path(root)
+    root_path.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
     info = state.get("race_info", {})
     title = label.strip() or " ".join(str(v) for v in [info.get("日付", ""), info.get("競馬場", ""), info.get("レース番号", ""), info.get("レース名", "")] if v) or "名称未設定"
     slug = re.sub(r"[^\w\-]+", "_", title).strip("_")[:80] or "prediction"
-    path = Path(root) / f"{now.strftime('%Y%m%d_%H%M%S_%f')}_{slug}.json"
+    path = root_path / f"{now.strftime('%Y%m%d_%H%M%S_%f')}_{slug}.json"
     snapshot = deepcopy(state)
     snapshot["prediction_meta"] = {"title": title, "saved_at": now.isoformat(timespec="seconds"), "creator": "カミノ競馬クラブ"}
     temp = path.with_suffix(".tmp")
@@ -2358,7 +2391,8 @@ def list_predictions(root: str = "data/predictions", limit: int = 50) -> list[di
     avoids slow reruns while still making recent predictions easy to reopen.
     """
     result = []
-    for path in sorted(Path(root).glob("*.json"), reverse=True) if Path(root).exists() else []:
+    root_path = data_path(root)
+    for path in sorted(root_path.glob("*.json"), reverse=True) if root_path.exists() else []:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             meta = data.get("prediction_meta", {})

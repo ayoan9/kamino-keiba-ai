@@ -10,6 +10,7 @@ from pathlib import Path
 
 from lxml import html
 
+from .core import data_path
 from .jra_fetcher import _anchor_actions, _post_jra, _tables
 
 
@@ -132,7 +133,7 @@ def aggregate_history(races: list[dict], label: str) -> dict:
 
 def load_cached_history(race_info: dict, root: str = "data/history") -> dict | None:
     key = history_key(race_info)
-    path = Path(root) / "aggregates" / f"{key}.json"
+    path = data_path(root) / "aggregates" / f"{key}.json"
     if not path.exists(): return None
     try: return json.loads(path.read_text(encoding="utf-8"))
     except Exception: return None
@@ -220,6 +221,6 @@ def fetch_historical_trends(race_info: dict, root: str = "data/history", interva
         "キャッシュ利用": False,
     }
     key = history_key(race_info)
-    path = Path(root) / "aggregates" / f"{key}.json"; path.parent.mkdir(parents=True, exist_ok=True)
+    path = data_path(root) / "aggregates" / f"{key}.json"; path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".tmp"); temp.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8"); temp.replace(path)
     return result

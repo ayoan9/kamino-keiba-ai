@@ -24,7 +24,7 @@ from horse_ai.core import (
     extract_media_with_openai, extract_screenshot_with_macos_vision,
     extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
-    load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
+    data_path, load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
     fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
     save_layout_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
 )
@@ -234,7 +234,7 @@ def init():
         st.session_state.prediction_policy = load_prediction_profile().get("policy", "")
 
 
-DRAFT_ROOT = Path("data/drafts")
+DRAFT_ROOT = data_path("data/drafts")
 
 
 def _safe_draft_id(value: str) -> str:
@@ -322,6 +322,10 @@ def page_head(number: int, title: str, description: str):
 
 def section_label(label: str):
     st.markdown(f'<div class="section-label">{label}</div>', unsafe_allow_html=True)
+
+
+def progress_step(progress, percent: int, message: str):
+    progress.progress(max(0, min(100, percent)), text=f"{message}（{percent}%）")
 
 
 def _lap_format(value) -> str:
@@ -609,35 +613,44 @@ def step1():
             if st.button("資料からレース・出馬表を解析", type="primary", icon=":material/document_scanner:"):
                 media_files = [(f.name, f.type or "application/octet-stream", f.getvalue()) for f in uploaded_race_files[:6]]
                 try:
+                    progress = st.progress(0, text="解析準備中（0%）")
+                    progress_step(progress, 12, "ファイルを確認しています")
                     with st.spinner("PDF・画像を読み取っています…"):
                         extracted_summary = None
                         if analysis_method.startswith("netkeiba競馬新聞PDF"):
+                            progress_step(progress, 28, "PDF文字座標を解析しています")
                             first_name, first_mime, first_data = media_files[0]
                             extracted_info, extracted_horses, extracted_summary, extracted_text, extraction_warnings = extract_netkeiba_newspaper_pdf(first_data)
                         elif analysis_method.startswith("Macローカル"):
+                            progress_step(progress, 28, "画像OCRを実行しています")
                             first_name, first_mime, first_data = media_files[0]
                             extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_screenshot_with_macos_vision(first_data, first_name, first_mime)
                         elif api_key:
                             try:
+                                progress_step(progress, 28, "AI画像解析を実行しています")
                                 extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_media_with_openai(media_files, api_key, model, high_accuracy, active_profile)
                             except Exception as api_exc:
                                 if IS_MAC and ("429" in str(api_exc) or "insufficient_quota" in str(api_exc)):
+                                    progress_step(progress, 50, "ローカルOCRへ切り替えています")
                                     first_name, first_mime, first_data = media_files[0]
                                     extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_screenshot_with_macos_vision(first_data, first_name, first_mime)
                                     extraction_warnings.insert(0, "OpenAI APIの利用枠がないため、MacローカルOCRへ自動切替しました")
                                 else:
                                     raise
                         elif IS_MAC:
+                            progress_step(progress, 28, "MacローカルOCRを実行しています")
                             first_name, first_mime, first_data = media_files[0]
                             extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_screenshot_with_macos_vision(first_data, first_name, first_mime)
                         else:
                             raise ValueError("共有版で画像を解析するには、管理者によるOpenAI APIキー設定が必要です。netkeiba競馬新聞PDFはキーなしで解析できます。")
+                    progress_step(progress, 78, "読み取り結果を画面へ反映しています")
                     race["race_info"].update({k: v for k, v in extracted_info.items() if v not in ("", None)})
                     if extracted_horses: race["horses"] = extracted_horses
                     if extracted_summary: race["summary"].update(extracted_summary)
                     st.session_state.media_extracted_text = extracted_text
                     st.session_state.media_extraction_warnings = extraction_warnings
                     persist("資料の解析結果を保存しました")
+                    progress_step(progress, 100, "解析完了")
                     st.success(f"{len(extracted_horses)}頭を読み取りました。下の表で内容を確認してください。")
                     for warning in extraction_warnings:
                         st.warning(warning)
@@ -743,31 +756,40 @@ def step2():
         )
         if st.button("仮評価を生成", type="primary", width="stretch", icon=":material/auto_awesome:"):
             fallback_reason = ""
+            progress = st.progress(0, text="仮評価を準備しています（0%）")
+            progress_step(progress, 18, "出走馬データを整理しています")
             with st.spinner("各馬を仮評価しています…"):
                 if evaluation_mode.startswith("キー不要") and ollama_models:
                     try:
+                        progress_step(progress, 38, "ローカルAIで評価しています")
                         scores, comments, risks = evaluate_with_ollama(race["horses"], race["race_info"], ollama_model, policy_for_ai, trend_analysis=trend)
                         source = f"ローカルAI（{ollama_model}）"
                     except Exception:
+                        progress_step(progress, 58, "ルール評価へ切り替えています")
                         scores, comments, risks = heuristic_evaluations(race["horses"], active_prediction_profile, trend)
                         source = "ローカル仮評価（AI自動切替）"
                         fallback_reason = "ローカルAIを実行できなかったため"
                 elif evaluation_mode.startswith("OpenAI") and api_key:
                     try:
+                        progress_step(progress, 38, "OpenAIで評価しています")
                         scores, comments, risks = evaluate_with_openai(race["horses"], race["race_info"], api_key, model, policy_for_ai, trend)
                         source = "OpenAI API"
                     except Exception as exc:
+                        progress_step(progress, 58, "ローカル仮評価へ切り替えています")
                         scores, comments, risks = heuristic_evaluations(race["horses"], active_prediction_profile, trend)
                         source = "ローカル仮評価（OpenAIから自動切替）"
                         error_text = str(exc).lower()
                         fallback_reason = "OpenAI APIの利用枠が不足しているため" if "insufficient_quota" in error_text or "429" in error_text else "OpenAI APIと通信できなかったため"
                 else:
+                    progress_step(progress, 45, "ローカル仮評価を計算しています")
                     scores, comments, risks = heuristic_evaluations(race["horses"], active_prediction_profile, trend)
                     source = "キー不要のローカル仮評価"
+            progress_step(progress, 84, "評価結果を保存しています")
             race["ai_scores"], race["ai_comments"], race["risk_comments"] = scores, comments, risks
             race["final_scores"] = deepcopy(scores)
             race["evaluation_source"] = source
             persist("仮評価を保存しました")
+            progress_step(progress, 100, "仮評価完了")
             if fallback_reason:
                 st.warning(f"{fallback_reason}、ローカル仮評価で続行しました。入力データと評価は保存済みです。")
             else:
