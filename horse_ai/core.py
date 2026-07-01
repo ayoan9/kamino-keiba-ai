@@ -2134,9 +2134,17 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
             best_start, best_len = current_start, current_len
         body_lines = centers[best_start:best_start + best_len]
         # If expected runners are known and the detected body run is longer,
-        # keep exactly that many row bottoms from the top of the body.
+        # keep exactly that many row bottoms from the top of the body.  If the
+        # run is shorter, extend using the detected row height; some screenshots
+        # have weak lower grid lines, but row height remains stable.
         if expected and len(body_lines) >= expected:
             body_lines = body_lines[:expected]
+        elif expected and body_lines:
+            while len(body_lines) < expected:
+                next_line = int(round(body_lines[-1] + row_h_px))
+                if next_line >= height - 2:
+                    break
+                body_lines.append(next_line)
         if not expected and len(body_lines) > 18:
             body_lines = body_lines[:18]
         if len(body_lines) < 2:
@@ -2149,6 +2157,8 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
                 pad = max(1, int((bottom - top) * 0.05))
                 boxes.append(((top + pad) / height, (bottom - pad) / height))
         message = f"画像の罫線から出馬表{len(boxes)}行を検出しました（行高約{row_h_px}px）"
+        if expected and len(boxes) >= expected:
+            message += " / ヘッダー頭数まで行を補完"
         return boxes, message
 
     top_text = ocr((0.00, 0.00, 0.72, 0.18), psm=6)
