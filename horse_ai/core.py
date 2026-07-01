@@ -2081,6 +2081,76 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
         text = unicodedata.normalize("NFKC", text)
         return re.sub(r"\s+", " ", text).strip()
 
+    def detect_row_bounds(expected: int = 0) -> tuple[list[tuple[float, float]], str]:
+        """Detect netkeiba table row boundaries from horizontal grid lines.
+
+        Older MVP code used a fixed row_top ratio.  netkeiba screenshots vary in
+        header/tab height and can be 16 or 18 runners, so the fixed ratio may
+        start OCR from the second or third horse.  The left-middle table columns
+        contain long grey horizontal rules with little decoration; use those
+        rules to infer actual row boxes before running OCR.
+        """
+        try:
+            import numpy as np
+        except Exception:
+            return [], "行位置は固定比率で処理しました（numpy未利用）"
+        arr = np.array(image).astype(int)
+        # Stable/jockey/odds area has continuous horizontal grid lines and fewer
+        # colored frame blocks than the leftmost columns.
+        x1, x2 = int(width * 0.27), int(width * 0.67)
+        region = arr[:, x1:x2, :]
+        mx = region.max(axis=2)
+        mn = region.min(axis=2)
+        neutral = (mx - mn < 14) & (mx > 150) & (mx < 245)
+        score = neutral.mean(axis=1)
+        peaks = [y for y, value in enumerate(score) if y > height * 0.30 and value > 0.72]
+        groups: list[list[int]] = []
+        for y in peaks:
+            if not groups or y - groups[-1][-1] > 4:
+                groups.append([y])
+            else:
+                groups[-1].append(y)
+        centers = [sum(group) // len(group) for group in groups if group]
+        if len(centers) < 4:
+            return [], "行罫線を十分に検出できなかったため固定比率で処理しました"
+        gaps = [centers[i + 1] - centers[i] for i in range(len(centers) - 1)]
+        plausible = [gap for gap in gaps if 36 <= gap <= 80]
+        if not plausible:
+            return [], "行間隔を推定できなかったため固定比率で処理しました"
+        row_h_px = sorted(plausible)[len(plausible) // 2]
+        # Use the longest consecutive run with nearly the same row height.  In
+        # wide screenshots there may be header separator lines before the horse
+        # rows; this skips them and locks onto the repeated body grid.
+        best_start, best_len = 0, 1
+        current_start, current_len = 0, 1
+        for i, gap in enumerate(gaps):
+            if abs(gap - row_h_px) <= max(5, row_h_px * 0.18):
+                current_len += 1
+            else:
+                if current_len > best_len:
+                    best_start, best_len = current_start, current_len
+                current_start, current_len = i + 1, 1
+        if current_len > best_len:
+            best_start, best_len = current_start, current_len
+        body_lines = centers[best_start:best_start + best_len]
+        # If expected runners are known and the detected body run is longer,
+        # keep exactly that many row bottoms from the top of the body.
+        if expected and len(body_lines) >= expected:
+            body_lines = body_lines[:expected]
+        if not expected and len(body_lines) > 18:
+            body_lines = body_lines[:18]
+        if len(body_lines) < 2:
+            return [], "行罫線の連続区間が短いため固定比率で処理しました"
+        first_top = max(0, int(body_lines[0] - row_h_px))
+        boundaries = [first_top] + body_lines
+        boxes = []
+        for top, bottom in zip(boundaries, boundaries[1:]):
+            if bottom - top >= 24:
+                pad = max(1, int((bottom - top) * 0.05))
+                boxes.append(((top + pad) / height, (bottom - pad) / height))
+        message = f"画像の罫線から出馬表{len(boxes)}行を検出しました（行高約{row_h_px}px）"
+        return boxes, message
+
     top_text = ocr((0.00, 0.00, 0.72, 0.18), psm=6)
     file_text = unicodedata.normalize("NFKC", filename)
     combined_top = f"{file_text} {top_text}"
@@ -2122,12 +2192,79 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
     if expected_count:
         info["頭数"] = str(expected_count)
 
-    # Data rows begin immediately below the beige table header.  The row height
-    # is stable across the netkeiba desktop screenshots; when head count is
-    # known, use it to avoid reading the footer area.
-    row_top = 0.384
-    row_h = 0.0435
-    max_rows = expected_count if expected_count else min(18, max(1, int((0.992 - row_top) / row_h)))
+    detected_row_bounds, row_detection_note = detect_row_bounds(expected_count)
+    if detected_row_bounds:
+        row_bounds = detected_row_bounds
+    else:
+        # Fallback for screenshots where grid detection is impossible.
+        row_top = 0.329
+        row_h = 0.0372
+        max_rows = expected_count if expected_count else min(18, max(1, int((0.992 - row_top) / row_h)))
+        row_bounds = [(row_top + row_h * idx, min(0.996, row_top + row_h * (idx + 1))) for idx in range(max_rows)]
+    default_cols = {
+        "frame": (0.006, 0.033),
+        "number": (0.037, 0.064),
+        "name": (0.096, 0.278),
+        "sex_age": (0.282, 0.320),
+        "weight": (0.306, 0.342),
+        "jockey": (0.343, 0.408),
+        "stable": (0.408, 0.500),
+        "odds": (0.562, 0.624),
+        "popularity": (0.624, 0.654),
+    }
+
+    def detect_col_bounds() -> tuple[dict[str, tuple[float, float]], str]:
+        try:
+            import numpy as np
+        except Exception:
+            return default_cols, "列位置は固定比率で処理しました（numpy未利用）"
+        if not row_bounds:
+            return default_cols, "行位置が未検出のため列位置は固定比率で処理しました"
+        y1 = max(0, int(row_bounds[0][0] * height))
+        y2 = min(height, int(row_bounds[-1][1] * height))
+        if y2 - y1 < 80:
+            return default_cols, "出馬表の高さが不足したため列位置は固定比率で処理しました"
+        arr = np.array(image).astype(int)
+        region = arr[y1:y2, :, :]
+        mx = region.max(axis=2)
+        mn = region.min(axis=2)
+        neutral = (mx - mn < 14) & (mx > 150) & (mx < 245)
+        score = neutral.mean(axis=0)
+        peaks = [x for x, value in enumerate(score) if value > 0.62]
+        groups: list[list[int]] = []
+        for x in peaks:
+            if not groups or x - groups[-1][-1] > 4:
+                groups.append([x])
+            else:
+                groups[-1].append(x)
+        centers = [sum(group) / len(group) / width for group in groups if group]
+        if len(centers) < 10:
+            return default_cols, "列罫線を十分に検出できなかったため固定比率で処理しました"
+
+        def nearest(target: float) -> float:
+            return min(centers, key=lambda value: abs(value - target))
+
+        def box(left: float, right: float, pad: float = 0.004) -> tuple[float, float]:
+            l = nearest(left)
+            r = nearest(right)
+            if r <= l:
+                return left, right
+            return max(0, l + pad), min(0.999, r - pad)
+
+        cols = {
+            "frame": box(0.007, 0.034, 0.003),
+            "number": box(0.034, 0.065, 0.003),
+            "name": box(0.096, 0.270, 0.006),
+            "sex_age": box(0.270, 0.305, 0.004),
+            "weight": box(0.305, 0.342, 0.004),
+            "jockey": box(0.342, 0.408, 0.005),
+            "stable": box(0.408, 0.500, 0.006),
+            "odds": box(0.562, 0.623, 0.004),
+            "popularity": box(0.623, 0.653, 0.003),
+        }
+        return cols, f"画像の縦罫線から列位置を検出しました（{len(centers)}本）"
+
+    col_boxes, col_detection_note = detect_col_bounds()
     horses: list[dict] = []
     transcript_lines = [f"【ヘッダー】 {top_text}"]
 
@@ -2136,20 +2273,22 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
         text = re.sub(r"[^0-9A-Za-zぁ-んァ-ヶ一-龠ー・ヴヵヶ]+$", "", text)
         return text.strip()
 
-    for idx in range(max_rows):
-        y1 = row_top + row_h * idx
-        y2 = min(0.996, y1 + row_h)
+    for idx, (y1, y2) in enumerate(row_bounds):
         if y1 >= 0.996:
             break
-        frame = ocr((0.006, y1, 0.033, y2), lang="eng", whitelist="12345678")
-        number = ocr((0.037, y1, 0.064, y2), lang="eng", whitelist="0123456789")
-        name = clean_name(ocr((0.096, y1, 0.278, y2), psm=7))
-        sex_age = ocr((0.282, y1, 0.320, y2), whitelist="牡牝セ0123456789")
-        weight = ocr((0.322, y1, 0.360, y2), lang="eng", whitelist="0123456789.")
-        jockey = ocr((0.358, y1, 0.414, y2), psm=7)
-        stable = ocr((0.414, y1, 0.498, y2), psm=7)
-        odds = ocr((0.584, y1, 0.627, y2), lang="eng", whitelist="0123456789.")
-        popularity = ocr((0.628, y1, 0.661, y2), lang="eng", whitelist="0123456789")
+        def cell_box(name: str) -> tuple[float, float, float, float]:
+            x1, x2 = col_boxes[name]
+            return x1, y1, x2, y2
+
+        frame = ocr(cell_box("frame"), lang="eng", whitelist="12345678")
+        number = ocr(cell_box("number"), lang="eng", whitelist="0123456789")
+        name = clean_name(ocr(cell_box("name"), psm=7))
+        sex_age = ocr(cell_box("sex_age"), whitelist="牡牝セ0123456789")
+        weight = ocr(cell_box("weight"), lang="eng", whitelist="0123456789.")
+        jockey = ocr(cell_box("jockey"), psm=7)
+        stable = ocr(cell_box("stable"), psm=7)
+        odds = ocr(cell_box("odds"), lang="eng", whitelist="0123456789.")
+        popularity = ocr(cell_box("popularity"), lang="eng", whitelist="0123456789")
         if not name and not number:
             continue
         horse_no = int(re.sub(r"\D", "", number) or (idx + 1))
@@ -2174,7 +2313,7 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
 
     if not horses:
         raise RuntimeError("Tesseract固定出馬表OCRで出走馬を読み取れませんでした。画像の表示範囲・倍率を確認してください。")
-    warnings = [f"Tesseract固定出馬表OCRで{len(horses)}頭を読み取りました"]
+    warnings = [f"Tesseract固定出馬表OCRで{len(horses)}頭を読み取りました", row_detection_note, col_detection_note]
     if expected_count and len(horses) < expected_count:
         warnings.append(f"ヘッダー上は{expected_count}頭ですが、読み取れたのは{len(horses)}頭です。スクショ下部が切れていないか確認してください。")
     warnings.extend(_validate_extraction(info, horses))
