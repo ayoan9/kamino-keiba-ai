@@ -189,6 +189,31 @@ def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
     merged_horses: dict[int, dict] = {}
     texts: list[str] = []
     notes: list[str] = []
+
+    def expected_count_from_info(info: dict) -> int:
+        try:
+            return int(str(info.get("頭数", "") or "0").replace("頭", ""))
+        except ValueError:
+            return 0
+
+    def add_horses(horses: list[dict], prefer_sequential: bool = False) -> None:
+        expected_count = expected_count_from_info(merged_info)
+        for index, horse in enumerate(horses, 1):
+            number = str(horse.get("馬番", "")).strip()
+            fixed_number = 0
+            if prefer_sequential and expected_count and index <= expected_count:
+                fixed_number = index
+            elif number.isdigit():
+                fixed_number = int(number)
+                # Generic OCR often joins frame+horse number: "11" for horse 1,
+                # "22" for horse 2.  If the trailing digits match visual order,
+                # keep the row-order number.
+                if expected_count and fixed_number > expected_count and number.endswith(str(index)):
+                    fixed_number = index
+            if fixed_number:
+                horse["馬番"] = fixed_number
+                merged_horses[fixed_number] = horse
+
     for file in files or []:
         data = file.getvalue()
         name = getattr(file, "name", "画像")
@@ -196,10 +221,7 @@ def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
         try:
             info, horses, text, warnings = extract_screenshot_with_macos_vision(data, name, mime)
             merged_info.update({k: v for k, v in info.items() if v not in ("", None)})
-            for horse in horses:
-                number = str(horse.get("馬番", "")).strip()
-                if number.isdigit():
-                    merged_horses[int(number)] = horse
+            add_horses(horses)
             if text.strip():
                 texts.append(f"【{name} / 出馬表専用解析】\n{text.strip()}")
             notes.extend(f"{name}: {warning}" for warning in warnings)
@@ -208,10 +230,7 @@ def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
             try:
                 info, horses, text, warnings = extract_netkeiba_race_table_image_with_tesseract(data, name)
                 merged_info.update({k: v for k, v in info.items() if v not in ("", None)})
-                for horse in horses:
-                    number = str(horse.get("馬番", "")).strip()
-                    if number.isdigit():
-                        merged_horses[int(number)] = horse
+                add_horses(horses, prefer_sequential=True)
                 if text.strip():
                     texts.append(f"【{name} / Tesseract固定出馬表OCR】\n{text.strip()}")
                 notes.extend(f"{name}: {warning}" for warning in warnings)
@@ -229,10 +248,7 @@ def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
                             "任意メモ": "",
                         })
                         merged_info.update({k: v for k, v in fallback_info.items() if v not in ("", None)})
-                        for horse in fallback_horses:
-                            number = str(horse.get("馬番", "")).strip()
-                            if number.isdigit() and int(number) not in merged_horses:
-                                merged_horses[int(number)] = horse
+                        add_horses(fallback_horses)
                 except Exception as fallback_exc:
                     notes.append(f"{name}: 通常OCRにも失敗しました（{fallback_exc}）")
     return merged_info, [merged_horses[n] for n in sorted(merged_horses)], "\n\n".join(texts), list(dict.fromkeys(notes))

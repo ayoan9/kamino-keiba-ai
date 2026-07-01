@@ -2271,8 +2271,25 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
     def clean_name(text: str) -> str:
         text = re.sub(r"^[^0-9A-Za-zぁ-んァ-ヶ一-龠]+", "", text)
         text = re.sub(r"[^0-9A-Za-zぁ-んァ-ヶ一-龠ー・ヴヵヶ]+$", "", text)
+        text = re.sub(r"^(?:外|地|□|○|◎|☆|△|▲)+", "", text)
         return text.strip()
 
+    def clean_name_from_row_text(text: str, fallback_no: int) -> str:
+        """Recover a horse name from a full-row OCR string when cell OCR is weak."""
+        line = unicodedata.normalize("NFKC", str(text or ""))
+        line = re.sub(r"\s+", " ", line).strip()
+        line = re.sub(r"^[1-8]?\s*" + re.escape(str(fallback_no)) + r"\s*", "", line)
+        line = re.sub(r"^(?:--|[-ー]+)\s*", "", line)
+        # Stop at the sex/age column, which is usually the first reliable token
+        # after the name.
+        match = re.search(r"(.+?)\s+(?:牡|牝|セ)\s*\d", line)
+        if match:
+            return clean_name(match.group(1))
+        # Otherwise take Japanese text before the first obvious numeric column.
+        match = re.search(r"([A-Za-zァ-ヶぁ-ん一-龠ー・ヴヵヶ]+)", line)
+        return clean_name(match.group(1)) if match else ""
+
+    detected_grid = bool(detected_row_bounds)
     for idx, (y1, y2) in enumerate(row_bounds):
         if y1 >= 0.996:
             break
@@ -2289,10 +2306,25 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
         stable = ocr(cell_box("stable"), psm=7)
         odds = ocr(cell_box("odds"), lang="eng", whitelist="0123456789.")
         popularity = ocr(cell_box("popularity"), lang="eng", whitelist="0123456789")
-        if not name and not number:
+        row_text = ocr((0.032, y1, 0.662, y2), psm=6)
+        expected_no = idx + 1
+        if not name:
+            name = clean_name_from_row_text(row_text, expected_no)
+        if not name and not number and not row_text:
             continue
-        horse_no = int(re.sub(r"\D", "", number) or (idx + 1))
+        number_digits = re.sub(r"\D", "", number)
+        if detected_grid and (expected_count == 0 or expected_no <= expected_count):
+            horse_no = expected_no
+        else:
+            horse_no = int(number_digits or expected_no)
+            # OCR sometimes joins frame+horse number, e.g. 11 for frame 1 horse 1,
+            # 22 for frame 2 horse 2.  If the trailing digits match the row,
+            # keep the row-based number.
+            if number_digits and number_digits.endswith(str(expected_no)):
+                horse_no = expected_no
         frame_no = re.sub(r"\D", "", frame)
+        if detected_grid and not frame_no:
+            frame_no = str(min(8, max(1, (expected_no + 1) // 2)))
         stable = re.sub(r"^(?:美浦|栗東)\s*", "", stable).strip()
         odds_match = re.search(r"\d+(?:\.\d+)?", odds)
         pop_match = re.search(r"\d{1,2}", popularity)
