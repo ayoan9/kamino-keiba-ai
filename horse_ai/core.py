@@ -2132,45 +2132,62 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
                 current_start, current_len = i + 1, 1
         if current_len > best_len:
             best_start, best_len = current_start, current_len
-        body_lines = centers[best_start:best_start + best_len]
-        # The repeated grid run often starts at the bottom of the table header:
-        # header-bottom, horse1-bottom, horse2-bottom, ...
-        # If we use that first line as horse1-bottom, every horse name shifts
-        # down by one row.  Drop the header line when the run has one extra
-        # line, or when the previous grid gap is clearly header-sized.
-        header_line_likely = False
-        if expected and len(body_lines) >= expected + 1:
-            header_line_likely = True
-        elif body_lines and best_start > 0:
-            prev_gap = body_lines[0] - centers[best_start - 1]
-            header_line_likely = prev_gap >= row_h_px * 1.30
-        if header_line_likely:
-            body_lines = body_lines[1:]
-
-        # If expected runners are known and the detected body run is longer,
-        # keep exactly that many row bottoms from the top of the body.  If the
-        # run is shorter, extend using the detected row height; some screenshots
-        # have weak lower grid lines, but row height remains stable.
-        if expected and len(body_lines) >= expected:
-            body_lines = body_lines[:expected]
-        elif expected and body_lines:
-            while len(body_lines) < expected:
-                next_line = int(round(body_lines[-1] + row_h_px))
-                if next_line >= height - 2:
-                    break
-                body_lines.append(next_line)
-        if not expected and len(body_lines) > 18:
-            body_lines = body_lines[:18]
-        if len(body_lines) < 2:
+        run_lines = centers[best_start:best_start + best_len]
+        if not run_lines:
             return [], "行罫線の連続区間が短いため固定比率で処理しました"
-        first_top = max(0, int(body_lines[0] - row_h_px))
-        boundaries = [first_top] + body_lines
+
+        def extend_as_boundaries(lines: list[int], target_count: int) -> list[int]:
+            """Treat detected lines as row boundaries and extend missing bottoms."""
+            result = list(lines)
+            while target_count and len(result) < target_count + 1:
+                next_line = int(round(result[-1] + row_h_px))
+                if next_line >= height + max(3, row_h_px * 0.25):
+                    break
+                result.append(next_line)
+            return result[:target_count + 1] if target_count and len(result) >= target_count + 1 else result
+
+        def extend_as_bottoms(lines: list[int], target_count: int) -> list[int]:
+            """Treat detected lines as row bottom lines and infer the first top."""
+            bottoms = list(lines)
+            while target_count and len(bottoms) < target_count:
+                next_line = int(round(bottoms[-1] + row_h_px))
+                if next_line >= height + max(3, row_h_px * 0.25):
+                    break
+                bottoms.append(next_line)
+            if target_count and len(bottoms) > target_count:
+                bottoms = bottoms[:target_count]
+            return [max(0, int(bottoms[0] - row_h_px))] + bottoms
+
+        if expected:
+            boundary_candidate = extend_as_boundaries(run_lines, expected)
+            bottom_candidate = extend_as_bottoms(run_lines, expected)
+            # Some screenshots detect the first body line as the top of horse 1
+            # (top, horse1-bottom, ...).  Others only detect horse bottom lines.
+            # Choose boundary mode only when it can cover all expected rows
+            # within the image; otherwise infer the missing top from row height.
+            if len(boundary_candidate) >= expected + 1 and boundary_candidate[expected] <= height + max(3, row_h_px * 0.25):
+                boundaries = boundary_candidate
+                boundary_mode_note = " / 行上端から検出"
+            else:
+                boundaries = bottom_candidate
+                boundary_mode_note = " / 行下端から推定"
+        else:
+            lines = run_lines[:19] if len(run_lines) > 19 else run_lines
+            boundary_candidate = extend_as_boundaries(lines, min(18, max(1, len(lines) - 1)))
+            if len(boundary_candidate) >= 2:
+                boundaries = boundary_candidate
+                boundary_mode_note = " / 行上端から検出"
+            else:
+                boundaries = extend_as_bottoms(lines, 0)
+                boundary_mode_note = " / 行下端から推定"
+
         boxes = []
         for top, bottom in zip(boundaries, boundaries[1:]):
             if bottom - top >= 24:
                 pad = max(1, int((bottom - top) * 0.05))
                 boxes.append(((top + pad) / height, (bottom - pad) / height))
         message = f"画像の罫線から出馬表{len(boxes)}行を検出しました（行高約{row_h_px}px）"
+        message += boundary_mode_note
         if expected and len(boxes) >= expected:
             message += " / ヘッダー頭数まで行を補完"
         return boxes, message

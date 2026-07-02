@@ -19,6 +19,7 @@ from horse_ai.core import (
     cloud_storage_enabled,
     cloud_storage_status,
     data_path,
+    extract_netkeiba_newspaper_pdf,
     extract_netkeiba_race_table_image_with_tesseract,
     extract_screenshot_with_macos_vision,
     load_cloud_json,
@@ -184,7 +185,7 @@ def parse_csv_text(text: str) -> list[dict]:
 
 
 def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
-    """Use the same race-table image parser as the main prediction flow when possible."""
+    """Use the same race-data parsers as the main prediction flow when possible."""
     merged_info: dict = {}
     merged_horses: dict[int, dict] = {}
     texts: list[str] = []
@@ -218,6 +219,21 @@ def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
         data = file.getvalue()
         name = getattr(file, "name", "画像")
         mime = getattr(file, "type", "") or "image/png"
+        is_pdf = mime == "application/pdf" or str(name).lower().endswith(".pdf")
+        if is_pdf:
+            try:
+                info, horses, summary, text, warnings = extract_netkeiba_newspaper_pdf(data)
+                merged_info.update({k: v for k, v in info.items() if v not in ("", None)})
+                add_horses(horses)
+                if text.strip():
+                    texts.append(f"【{name} / netkeiba競馬新聞PDF】\n{text.strip()}")
+                pdf_notes = [f"{name}: {warning}" for warning in warnings]
+                if summary.get("展開予想"):
+                    pdf_notes.append(f"{name}: {summary.get('展開予想')}")
+                notes.extend(pdf_notes)
+                continue
+            except Exception as exc:
+                notes.append(f"{name}: netkeiba競馬新聞PDF解析に失敗したため画像/OCR解析へ切り替えます（{exc}）")
         try:
             info, horses, text, warnings = extract_screenshot_with_macos_vision(data, name, mime)
             merged_info.update({k: v for k, v in info.items() if v not in ("", None)})
@@ -504,17 +520,17 @@ section = st.radio(
 
 if section == "出馬表取込・選択入力":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">出馬表スクショから選択式で実績登録</div>', unsafe_allow_html=True)
-    st.caption("画像読み取りは出馬表だけに絞ります。買い目・結果・振り返りは、読み取った馬番候補から選ぶだけで登録できます。")
+    st.markdown('<div class="section-title">PDF・出馬表スクショから選択式で実績登録</div>', unsafe_allow_html=True)
+    st.caption("基本はnetkeiba競馬新聞PDF推奨です。PDFなら文字座標から読むため、スクショOCRより安定します。買い目・結果・振り返りは、読み取った馬番候補から選ぶだけで登録できます。")
     race_images = st.file_uploader(
-        "出走表・レース情報のスクショ",
-        type=["png", "jpg", "jpeg", "webp"],
+        "netkeiba競馬新聞PDF、または出走表・レース情報のスクショ",
+        type=["pdf", "png", "jpg", "jpeg", "webp"],
         accept_multiple_files=True,
         key="lab_race_screenshots",
     )
-    if st.button("出馬表を読み取る", type="primary", disabled=not race_images):
-        progress = st.progress(0, text="出馬表を読み取る準備中（0%）")
-        progress.progress(20, text="画像を確認しています（20%）")
+    if st.button("資料から出馬表を読み取る", type="primary", disabled=not race_images):
+        progress = st.progress(0, text="資料を読み取る準備中（0%）")
+        progress.progress(20, text="PDF・画像形式を確認しています（20%）")
         race_info, horses, race_ocr, race_notes = extract_race_screenshots(race_images)
         progress.progress(70, text="出走馬候補を整理しています（70%）")
         if not horses and race_ocr.strip():
