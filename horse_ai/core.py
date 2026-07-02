@@ -2320,7 +2320,7 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
         expected_no = idx + 1
         if not name:
             name = clean_name_from_row_text(row_text, expected_no)
-        if not name and not number and not row_text:
+        if not detected_grid and not name and not number and not row_text:
             continue
         number_digits = re.sub(r"\D", "", number)
         if detected_grid and (expected_count == 0 or expected_no <= expected_count):
@@ -2351,7 +2351,8 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
             "単勝オッズ": float(odds_match.group()) if odds_match else "",
         })
         horses.append(horse)
-        transcript_lines.append(" ".join(str(v) for v in [horse.get("枠番"), horse_no, name, sex_age, weight, jockey, stable, odds, popularity] if v not in ("", None)))
+        line_parts = [horse.get("枠番"), horse_no, name or "（馬名未読取）", sex_age, weight, jockey, stable, odds, popularity]
+        transcript_lines.append(" ".join(str(v) for v in line_parts if v not in ("", None)))
 
     if not horses:
         raise RuntimeError("Tesseract固定出馬表OCRで出走馬を読み取れませんでした。画像の表示範囲・倍率を確認してください。")

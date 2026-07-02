@@ -230,7 +230,7 @@ def extract_race_screenshots(files) -> tuple[dict, list[dict], str, list[str]]:
             try:
                 info, horses, text, warnings = extract_netkeiba_race_table_image_with_tesseract(data, name)
                 merged_info.update({k: v for k, v in info.items() if v not in ("", None)})
-                add_horses(horses, prefer_sequential=True)
+                add_horses(horses)
                 if text.strip():
                     texts.append(f"【{name} / Tesseract固定出馬表OCR】\n{text.strip()}")
                 notes.extend(f"{name}: {warning}" for warning in warnings)
