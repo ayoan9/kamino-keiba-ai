@@ -2133,6 +2133,20 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
         if current_len > best_len:
             best_start, best_len = current_start, current_len
         body_lines = centers[best_start:best_start + best_len]
+        # The repeated grid run often starts at the bottom of the table header:
+        # header-bottom, horse1-bottom, horse2-bottom, ...
+        # If we use that first line as horse1-bottom, every horse name shifts
+        # down by one row.  Drop the header line when the run has one extra
+        # line, or when the previous grid gap is clearly header-sized.
+        header_line_likely = False
+        if expected and len(body_lines) >= expected + 1:
+            header_line_likely = True
+        elif body_lines and best_start > 0:
+            prev_gap = body_lines[0] - centers[best_start - 1]
+            header_line_likely = prev_gap >= row_h_px * 1.30
+        if header_line_likely:
+            body_lines = body_lines[1:]
+
         # If expected runners are known and the detected body run is longer,
         # keep exactly that many row bottoms from the top of the body.  If the
         # run is shorter, extend using the detected row height; some screenshots
