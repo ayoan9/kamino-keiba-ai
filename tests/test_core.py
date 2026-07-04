@@ -30,13 +30,14 @@ def test_ai_bet_plans_choose_points_and_ticket_types_without_user_limit():
     horses, scores = sample()
     rows = calculate_scores(horses, scores, {key: 1 for key in SCORE_KEYS})
     plans = propose_bet_plans(rows, generate_marks(rows), 5000, 100, 1.1)
-    assert set(plans) == {"軸セット", "的中重視", "バランス", "高回収狙い"}
+    assert set(plans) == {"軸セット", "的中30%型", "回収重視", "高回収狙い"}
     assert sum(bool(plan.get("recommended")) for plan in plans.values()) == 1
     for plan in plans.values():
         assert sum(bet["推奨購入金額"] for bet in plan["bets"]) <= 5000
         assert all(bet["推奨購入金額"] % 100 == 0 for bet in plan["bets"])
         assert all("的中期待度" in bet and "回収期待指数" in bet for bet in plan["bets"])
     assert {"単勝", "馬連", "ワイド"} & {bet["券種"] for bet in plans["軸セット"]["bets"]}
+    assert len(plans["的中30%型"]["bets"]) <= 5
     assert any(bet["券種"] in {"3連複", "3連単"} for bet in plans["高回収狙い"]["bets"])
 
 
