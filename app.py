@@ -554,6 +554,60 @@ def _race_datetime(offset_minutes: int = 0) -> datetime:
         return datetime.now().replace(second=0, microsecond=0) + timedelta(minutes=offset_minutes)
 
 
+def run_jra_fetch_job(current_race: dict, job: dict) -> None:
+    """Run a single JRA odds/result fetch and mutate race state with logs."""
+    job["status"] = "fetching"
+    try:
+        if job["kind"] == "odds":
+            snapshot = fetch_jra_odds(current_race["race_info"])
+            previous = current_race["odds_history"][-1].get("odds", {}) if current_race.get("odds_history") else {}
+            comparisons, alerts = compare_odds(previous, snapshot["odds"], float(st.session_state.min_odds))
+            current_race.setdefault("odds_history", []).append({**snapshot, "comparisons": comparisons})
+            current_race["alerts"] = alerts
+            for horse in current_race.get("horses", []):
+                key = f'単勝 {horse.get("馬番")}'
+                if key in snapshot["odds"]:
+                    horse["単勝オッズ"] = snapshot["odds"][key]
+            if current_race.get("final_scores"):
+                current_race["score_results"] = calculate_scores(current_race["horses"], current_race["final_scores"], current_race["weights"])
+            if current_race.get("score_results"):
+                current_race["bet_plans"] = propose_bet_plans(
+                    current_race["score_results"],
+                    current_race.get("marks", {}),
+                    int(st.session_state.budget),
+                    int(st.session_state.unit),
+                    float(st.session_state.min_odds),
+                    snapshot["odds"],
+                    load_prediction_profile(),
+                )
+                selected_name = current_race.get("selected_bet_plan")
+                if selected_name not in current_race["bet_plans"]:
+                    selected_name = next((name for name, plan in current_race["bet_plans"].items() if plan.get("recommended")), next(iter(current_race["bet_plans"]), ""))
+                selected_plan = current_race["bet_plans"].get(selected_name, {})
+                current_race["selected_bet_plan"] = selected_name
+                current_race["bets"], current_race["skipped_bets"] = selected_plan.get("bets", []), selected_plan.get("skipped", [])
+                current_race["marks"] = align_marks_to_bets(current_race["score_results"], current_race["bets"], current_race.get("marks", {}))
+            job["message"] = f'{len(snapshot["取得券種"])}券種を取得 / 単複オッズ{len(snapshot["odds"])}件を反映'
+        else:
+            result = fetch_jra_result(current_race["race_info"])
+            feedback = {
+                **current_race.get("result_feedback", {}),
+                "確定着順": result["確定着順"],
+                "登録日時": result["取得時刻"],
+                "取得元": result["取得元"],
+            }
+            current_race["result_feedback"] = feedback
+            if current_race.get("score_results"):
+                learn_from_race_result(current_race, feedback)
+            job["message"] = f'{len(result["着順馬番"])}頭の結果を取得'
+        job["status"] = "completed"
+        job["completed_at"] = datetime.now().isoformat(timespec="seconds")
+    except Exception as exc:
+        job["status"] = "error"
+        job["message"] = str(exc)[:240]
+    current_race.setdefault("jra_auto_fetch_log", []).append({**job})
+
+
 @st.fragment(run_every=15)
 def jra_schedule_runner():
     current_race = st.session_state.race
@@ -562,35 +616,8 @@ def jra_schedule_runner():
     due = [item for item in schedules if item.get("status") == "pending" and datetime.fromisoformat(item["scheduled_at"]) <= now]
     if due:
         job = sorted(due, key=lambda item: item["scheduled_at"])[0]
-        job["status"] = "fetching"; save_json(current_race)
-        try:
-            if job["kind"] == "odds":
-                snapshot = fetch_jra_odds(current_race["race_info"])
-                previous = current_race["odds_history"][-1].get("odds", {}) if current_race.get("odds_history") else {}
-                comparisons, alerts = compare_odds(previous, snapshot["odds"], float(st.session_state.min_odds))
-                current_race.setdefault("odds_history", []).append({**snapshot, "comparisons": comparisons})
-                current_race["alerts"] = alerts
-                for horse in current_race.get("horses", []):
-                    key = f'単勝 {horse.get("馬番")}'
-                    if key in snapshot["odds"]: horse["単勝オッズ"] = snapshot["odds"][key]
-                if current_race.get("final_scores"):
-                    current_race["score_results"] = calculate_scores(current_race["horses"], current_race["final_scores"], current_race["weights"])
-                job["message"] = f'{len(snapshot["取得券種"])}券種を取得'
-            else:
-                result = fetch_jra_result(current_race["race_info"])
-                feedback = {
-                    **current_race.get("result_feedback", {}),
-                    "確定着順": result["確定着順"],
-                    "登録日時": result["取得時刻"],
-                    "取得元": result["取得元"],
-                }
-                current_race["result_feedback"] = feedback
-                if current_race.get("score_results"): learn_from_race_result(current_race, feedback)
-                job["message"] = f'{len(result["着順馬番"])}頭の結果を取得'
-            job["status"] = "completed"; job["completed_at"] = datetime.now().isoformat(timespec="seconds")
-        except Exception as exc:
-            job["status"] = "error"; job["message"] = str(exc)[:240]
-        current_race.setdefault("jra_auto_fetch_log", []).append({**job})
+        save_json(current_race)
+        run_jra_fetch_job(current_race, job)
         save_json(current_race)
     pending = [item for item in schedules if item.get("status") == "pending"]
     if pending:
@@ -1272,7 +1299,7 @@ def step4():
     page_head(4, "オッズと直前状態を確認する", "能力評価を固定したまま、最新オッズと状態変化から妙味を確認します。")
     st.markdown('<div class="guide">評価の軸は固定したまま、オッズ由来の「妙味」だけを見直します。全オッズ入力が難しい場合は、netkeiba等の人気上位表だけでも買い目推定に使えます。</div>', unsafe_allow_html=True)
     with st.expander("JRA公式から指定時刻に自動取得", expanded=True):
-        st.caption("JRAへ常時アクセスせず、予約した時刻に1セットだけ取得します。アプリとこの画面を開いたままにしてください。券種ページ間も間隔を空けます。")
+        st.caption("JRAへ常時アクセスせず、予約した時刻に1セットだけ取得します。Render無料枠ではスリープや画面離脱で予約取得が止まることがあるため、直前は「今すぐ取得」も使ってください。")
         identity = race.get("race_info", {})
         required_identity = all(identity.get(key) not in ("", None) for key in ("日付", "競馬場", "開催回", "開催日", "レース番号"))
         if not required_identity:
@@ -1295,10 +1322,35 @@ def step4():
             jobs.append({"kind": "result", "scheduled_at": result_at.isoformat(timespec="minutes"), "status": "pending"})
             race["jra_fetch_schedule"] = completed + jobs
             persist("JRA自動取得を予約しました"); st.rerun()
+        now_c1, now_c2 = st.columns(2)
+        with now_c1:
+            if st.button("今すぐJRAオッズ取得", disabled=not required_identity, icon=":material/refresh:"):
+                with st.spinner("JRA公式からオッズを取得しています…"):
+                    job = {"kind": "odds", "scheduled_at": datetime.now().isoformat(timespec="minutes"), "status": "pending", "manual": True}
+                    run_jra_fetch_job(race, job)
+                    persist("JRAオッズ取得を実行しました")
+                st.rerun()
+        with now_c2:
+            if st.button("今すぐJRA結果取得", disabled=not required_identity, icon=":material/flag:"):
+                with st.spinner("JRA公式から結果を取得しています…"):
+                    job = {"kind": "result", "scheduled_at": datetime.now().isoformat(timespec="minutes"), "status": "pending", "manual": True}
+                    run_jra_fetch_job(race, job)
+                    persist("JRA結果取得を実行しました")
+                st.rerun()
         if race.get("jra_fetch_schedule"):
             status_labels = {"pending": "待機中", "fetching": "取得中", "completed": "完了", "error": "要確認"}
             schedule_rows = [{"種類": "オッズ" if item["kind"] == "odds" else "結果", "予定時刻": item["scheduled_at"].replace("T", " "), "状態": status_labels.get(item.get("status"), item.get("status")), "内容": item.get("message", "")} for item in race["jra_fetch_schedule"]]
             st.dataframe(pd.DataFrame(schedule_rows), hide_index=True, width="stretch")
+        if race.get("jra_auto_fetch_log"):
+            with st.expander("JRA取得ログ", expanded=False):
+                status_labels = {"pending": "待機中", "fetching": "取得中", "completed": "完了", "error": "要確認"}
+                log_rows = [{
+                    "種類": "オッズ" if item.get("kind") == "odds" else "結果",
+                    "実行時刻": item.get("completed_at", item.get("scheduled_at", "")).replace("T", " "),
+                    "状態": status_labels.get(item.get("status"), item.get("status", "")),
+                    "内容": item.get("message", ""),
+                } for item in race["jra_auto_fetch_log"][-8:]]
+                st.dataframe(pd.DataFrame(log_rows), hide_index=True, width="stretch")
     section_label("手動入力（自動取得できない場合）")
     with st.expander("人気上位オッズ表から推定する", expanded=True):
         st.caption("おすすめはURL取得です。netkeibaの人気上位オッズ表を直接読み取り、表示されていない買い目は単勝支持率から推定します。画像・テキスト入力は予備手段として使えます。")
