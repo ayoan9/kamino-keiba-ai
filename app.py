@@ -23,7 +23,7 @@ from horse_ai.core import (
     compare_odds, delete_local_api_key, evaluate_with_openai,
     evaluate_with_ollama,
     extract_media_with_openai, extract_screenshot_with_macos_vision,
-    extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks,
+    extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks, align_marks_to_bets,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
     cloud_storage_enabled, cloud_storage_status, data_path, load_cloud_json, load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
     fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
@@ -1126,12 +1126,14 @@ def step5():
         race["selected_bet_plan"] = recommended
         selected = race["bet_plans"].get(recommended, {})
         race["bets"], race["skipped_bets"] = selected.get("bets", []), selected.get("skipped", [])
+        race["marks"] = align_marks_to_bets(race["score_results"], race["bets"], race.get("marks", {}))
         persist("買い方の候補を保存しました")
     if race.get("bet_plans"):
         section_label("AIが比較した買い方")
         plan_names = list(race["bet_plans"])
         plan_cols = st.columns(len(plan_names))
         descriptions = {
+            "軸セット": "軸1頭から単勝・馬連・ワイドをセット買い",
             "的中重視": "複勝・ワイド中心。まず当てる確率を残す",
             "バランス": "全券種比較。信頼度と妙味を両立",
             "実績反映": "買い目実績ラボで成績が出ている券種を参考",
@@ -1153,6 +1155,7 @@ def step5():
         if st.button("この買い方を採用", icon=":material/check_circle:"):
             race["selected_bet_plan"] = selected_name
             race["bets"], race["skipped_bets"] = selected_plan["bets"], selected_plan["skipped"]
+            race["marks"] = align_marks_to_bets(race["score_results"], race["bets"], race.get("marks", {}))
             persist(f"{selected_name}を採用しました"); st.rerun()
     with st.expander("買い目を選択式で手動調整する", expanded=bool(race.get("manual_bet_rows"))):
         st.caption("AI案をベースに、軸流し・マルチ・ボックス・フォーメーションなどを選ぶだけで最終買い目を調整できます。金額は1点あたりです。")
@@ -1242,6 +1245,7 @@ def step5():
         if st.button("この手動調整を採用", type="primary", disabled=not manual_bets or manual_total > int(budget), icon=":material/tune:"):
             race["selected_bet_plan"] = "手動調整"
             race["bets"], race["skipped_bets"] = manual_bets, manual_skipped
+            race["marks"] = align_marks_to_bets(race["score_results"], race["bets"], race.get("marks", {}))
             persist("手動調整した買い目を保存しました")
             st.rerun()
     if race["bets"]:
@@ -1419,6 +1423,7 @@ def step4():
         selected_plan = race["bet_plans"].get(selected_name, {})
         race["selected_bet_plan"] = selected_name
         race["bets"], race["skipped_bets"] = selected_plan.get("bets", []), selected_plan.get("skipped", [])
+        race["marks"] = align_marks_to_bets(race["score_results"], race["bets"], race.get("marks", {}))
         persist("オッズ履歴と再配分を保存しました")
     if race["odds_history"]:
         latest = race["odds_history"][-1]

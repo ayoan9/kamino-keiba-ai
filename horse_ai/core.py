@@ -1702,6 +1702,81 @@ def generate_marks(rows: list[dict]) -> dict[str, str]:
     return marks
 
 
+def align_marks_to_bets(rows: list[dict], bets: list[dict], fallback_marks: dict | None = None) -> dict[str, str]:
+    """Rebuild marks so they match the actually selected betting portfolio.
+
+    The first mark pass is score-driven.  Once a bet plan is adopted, the marks
+    should explain the portfolio: heavily staked anchor gets ◎, thick partners
+    get ○/▲, value horses used mainly in wide/trifecta legs can become ☆.
+    """
+    if not rows:
+        return {}
+    if not bets:
+        return dict(fallback_marks or generate_marks(rows))
+    by_no = {str(row.get("馬番")): row for row in rows}
+    used: dict[str, dict[str, float]] = {}
+    for bet in bets:
+        ticket = str(bet.get("券種", "") or "")
+        stake = _float(bet.get("推奨購入金額"), 0)
+        text = str(bet.get("買い目", "") or "")
+        numbers = re.findall(r"\d{1,2}", text.replace(ticket, ""))
+        unique = [n for n in dict.fromkeys(numbers) if n in by_no]
+        if not unique:
+            continue
+        for pos, number in enumerate(unique):
+            bucket = used.setdefault(number, {"stake": 0.0, "main": 0.0, "wide": 0.0, "triple": 0.0, "count": 0.0})
+            bucket["stake"] += stake
+            bucket["count"] += 1
+            if pos == 0:
+                bucket["main"] += stake * (1.25 if ticket in {"単勝", "馬連", "馬単"} else 1.0)
+            if ticket in {"ワイド", "複勝"}:
+                bucket["wide"] += stake
+            if ticket in {"3連複", "3連単"}:
+                bucket["triple"] += stake
+    if not used:
+        return dict(fallback_marks or generate_marks(rows))
+
+    marks = {str(row["馬番"]): "消" for row in rows}
+    ranked = sorted(
+        used,
+        key=lambda n: (
+            used[n]["stake"] + used[n]["main"] * .65 + by_no[n].get("本命スコア", 0) * 18 + by_no[n].get("総合スコア", 0) * 10,
+            by_no[n].get("レース内指数", 0),
+        ),
+        reverse=True,
+    )
+    anchor = max(
+        used,
+        key=lambda n: (
+            used[n]["main"] + used[n]["stake"] * .35 + by_no[n].get("本命スコア", 0) * 20,
+            by_no[n].get("総合スコア", 0),
+        ),
+    )
+    marks[anchor] = "◎"
+    opponents = [n for n in ranked if n != anchor]
+    if opponents:
+        marks[opponents[0]] = "○"
+    if len(opponents) > 1:
+        # 対抗級が拮抗する場合は○を2頭まで許容する。
+        first_power = used[opponents[0]]["stake"] + by_no[opponents[0]].get("総合スコア", 0) * 60
+        second_power = used[opponents[1]]["stake"] + by_no[opponents[1]].get("総合スコア", 0) * 60
+        marks[opponents[1]] = "○" if second_power >= first_power * .92 else "▲"
+    if len(opponents) > 2:
+        marks[opponents[2]] = "▲" if "▲" not in marks.values() else "△"
+
+    value_candidates = sorted(
+        [n for n in opponents if marks.get(n) in {"△", "消"} or used[n]["wide"] or used[n]["triple"]],
+        key=lambda n: (by_no[n].get("妙味スコア", 0) * 100 + used[n]["wide"] * .25 + used[n]["triple"] * .15),
+        reverse=True,
+    )
+    if value_candidates:
+        marks[value_candidates[0]] = "☆"
+    for n in opponents:
+        if marks.get(n) == "消":
+            marks[n] = "△"
+    return marks
+
+
 ALL_BET_TYPES = ["単勝", "複勝", "枠連", "馬連", "ワイド", "馬単", "3連複", "3連単"]
 
 
@@ -1857,6 +1932,91 @@ def _ticket_preferences_from_profile(profile: dict | None) -> list[str]:
     return [ticket for _, ticket in sorted(ranked, reverse=True)[:5]]
 
 
+def _portfolio_summary(bets: list[dict], skipped: list[dict]) -> dict:
+    avg_hit = sum(b["的中期待度"] * b["推奨購入金額"] for b in bets) / sum(b["推奨購入金額"] for b in bets)
+    avg_value = sum(b["回収期待指数"] * b["推奨購入金額"] for b in bets) / sum(b["推奨購入金額"] for b in bets)
+    return {"点数": len(bets), "的中期待指数": round(avg_hit, 1), "回収期待指数": round(avg_value, 1)}
+
+
+def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None) -> tuple[list[dict], list[dict]]:
+    """Build the user's preferred one-anchor set: win + quinella + wide.
+
+    Popular-side anchors are treated as likely top-two horses, so 馬連 is kept
+    thick.  Value-side anchors are allowed to run third, so ワイド and 3連複 are
+    emphasized while 単勝 remains a smaller upside ticket.
+    """
+    if not rows or budget < unit:
+        return [], []
+    odds_map = odds_map or {}
+    by_no = {str(r["馬番"]): r for r in rows}
+    anchor = next((n for n, m in marks.items() if m == "◎" and n in by_no), str(rows[0]["馬番"]))
+    anchor_row = by_no[anchor]
+    popularity = _float(anchor_row.get("人気"), 99)
+    single_odds = _float(anchor_row.get("単勝オッズ"), 12)
+    popular_anchor = popularity <= 5 or single_odds <= 10
+    opponents = [
+        str(r["馬番"]) for r in rows
+        if str(r["馬番"]) != anchor and marks.get(str(r["馬番"])) != "消"
+    ][:5]
+    candidates: list[dict] = []
+    skipped: list[dict] = []
+
+    def add(ticket: str, nums: list[str], weight: float, reason: str) -> None:
+        key = _odds_lookup_key(ticket, nums)
+        if any(n not in by_no for n in nums):
+            return
+        rs = [by_no[n] for n in nums]
+        odds = float(odds_map.get(key, _estimated_odds(ticket, rs)))
+        confidence = sum(r["本命スコア"] for r in rs) / len(rs) / 5
+        value = sum(r["妙味スコア"] for r in rs) / len(rs) / 5
+        hit_factor = {"単勝": .52, "馬連": .48, "ワイド": .70, "3連複": .32}.get(ticket, .45)
+        hit_index = max(5, min(90, confidence * hit_factor * 100 + (4 if anchor in nums else 0)))
+        value_index = max(10, min(99, (confidence * .35 + value * .45 + .20) * 72 + math.log1p(odds) * 6))
+        utility = (hit_index * .48 + value_index * .52) * weight
+        item = {
+            "買い目": key, "券種": ticket, "買い目スコア": round(utility / 100, 4),
+            "現在オッズ": round(odds, 2), "オッズ区分": "取得値" if key in odds_map else "推定値",
+            "的中期待度": round(hit_index, 1), "回収期待指数": round(value_index, 1),
+            "狙い": reason, "見送り理由": "",
+        }
+        if odds < min_odds:
+            skipped.append({**item, "見送り理由": f"最低買いオッズ{min_odds:.1f}未満"})
+        else:
+            candidates.append(item)
+
+    add("単勝", [anchor], .92 if popular_anchor else .65, "軸馬の勝ち切りを押さえる単勝")
+    for idx, opponent in enumerate(opponents[:3 if popular_anchor else 2]):
+        add("馬連", [anchor, opponent], 1.08 - idx * .08, "軸馬の2着以内を想定した馬連")
+    for idx, opponent in enumerate(opponents[:4 if popular_anchor else 5]):
+        add("ワイド", [anchor, opponent], 1.18 - idx * .07, "軸馬から相手を拾うセット買いのワイド")
+    if not popular_anchor:
+        secondary = opponents[:4]
+        for left_i, left in enumerate(secondary):
+            for right in secondary[left_i + 1:]:
+                add("3連複", [anchor, left, right], .72, "穴軸が3着まで来る形を拾う3連複")
+    else:
+        for left, right in [tuple(opponents[:2])] if len(opponents) >= 2 else []:
+            add("3連複", [anchor, left, right], .46, "上位決着時の配当上積みを狙う3連複")
+
+    selected = sorted(candidates, key=lambda x: x["買い目スコア"], reverse=True)[:min(max(1, budget // unit), 9)]
+    if not selected:
+        return [], skipped
+    usable = (budget // unit) * unit
+    total = sum(item["買い目スコア"] for item in selected)
+    amounts = [math.floor((usable * item["買い目スコア"] / total) / unit) * unit for item in selected]
+    remainder = usable - sum(amounts)
+    for idx in range(remainder // unit):
+        amounts[idx % len(amounts)] += unit
+    output = []
+    for item, amount in zip(selected, amounts):
+        if amount <= 0:
+            skipped.append({**item, "見送り理由": "配分額が最小購入単位未満"})
+            continue
+        payout = int(amount * item["現在オッズ"])
+        output.append({**item, "推奨購入金額": amount, "想定払戻": payout, "想定利益": payout - amount})
+    return output, skipped
+
+
 def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None, prediction_profile: dict | None = None) -> dict[str, dict]:
     """Compare all ticket types and return distinct, budget-safe portfolio viewpoints."""
     if not rows or budget < unit:
@@ -1864,6 +2024,7 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
     available_units = max(1, budget // unit)
     preferred_types = _ticket_preferences_from_profile(prediction_profile)
     settings = {
+        "軸セット": (["単勝", "馬連", "ワイド"], "標準", min(available_units, 8)),
         "的中重視": (["複勝", "ワイド", "枠連", "馬連", "3連複"], "安定回収", min(available_units, 7)),
         "バランス": (ALL_BET_TYPES, "標準", min(available_units, 9)),
     }
@@ -1871,15 +2032,22 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
         settings["実績反映"] = (preferred_types, "標準", min(available_units, 8))
     settings["高回収狙い"] = (["単勝", "馬単", "3連複", "3連単"], "攻め", min(available_units, 10))
     plans = {}
+    anchor_bets, anchor_skipped = build_anchor_set_plan(rows, marks, budget, unit, min_odds, odds_map)
+    if anchor_bets:
+        plans["軸セット"] = {
+            "bets": anchor_bets,
+            "skipped": anchor_skipped,
+            "summary": {**_portfolio_summary(anchor_bets, anchor_skipped), "型": "単勝・馬連・ワイド中心"},
+        }
     for name, (types, mode, internal_limit) in settings.items():
+        if name == "軸セット":
+            continue
         bets, skipped = optimize_bets(rows, marks, budget, unit, types, mode, internal_limit, min_odds, odds_map)
         if not bets:
             continue
-        avg_hit = sum(b["的中期待度"] * b["推奨購入金額"] for b in bets) / sum(b["推奨購入金額"] for b in bets)
-        avg_value = sum(b["回収期待指数"] * b["推奨購入金額"] for b in bets) / sum(b["推奨購入金額"] for b in bets)
         plans[name] = {
             "bets": bets, "skipped": skipped,
-            "summary": {"点数": len(bets), "的中期待指数": round(avg_hit, 1), "回収期待指数": round(avg_value, 1)},
+            "summary": _portfolio_summary(bets, skipped),
         }
         if name == "実績反映":
             plans[name]["summary"]["実績券種"] = "・".join(preferred_types)
@@ -1893,6 +2061,11 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
                 base += min(4.0, overlap * 0.65)
                 if name == "実績反映":
                     base += 1.5
+            if name == "軸セット":
+                # This app should usually start from the user's familiar core:
+                # one anchor with win/quinella/wide, unless another plan is
+                # clearly superior on both hit and value.
+                base += 3.0
             return base
 
         recommended = max(plans, key=recommendation_score)
