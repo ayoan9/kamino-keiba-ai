@@ -2652,6 +2652,8 @@ def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, flo
     image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
     image = ImageOps.autocontrast(image, cutoff=1)
     width, height = image.size
+    if height / max(1, width) > 2.1:
+        return _parse_netkeiba_vertical_odds_image_layout(image, pytesseract)
 
     def crop_rel(box: tuple[float, float, float, float]) -> Image.Image:
         x1, y1, x2, y2 = box
@@ -2746,6 +2748,95 @@ def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, flo
         raise RuntimeError("固定レイアウトOCRでオッズ数字を読み取れませんでした。画像の表示範囲・倍率を確認してください。")
     notes.append(f"固定レイアウトOCRで{len(result)}件のオッズを読み取り")
     return result, "\n".join(notes)
+
+
+def _parse_netkeiba_vertical_odds_image_layout(image, pytesseract) -> tuple[dict[str, float], str]:
+    """Read netkeiba ticket-specific popular odds list screenshots.
+
+    This targets the long vertical "人気順" pages where one ticket type is
+    selected at the top, e.g. 3連単 with 1-100人気 rows.  The table has stable
+    numeric columns, so we avoid Japanese OCR and read only combination/odds
+    cells.  It complements the all-in-one popular odds panel parser above.
+    """
+    from PIL import Image, ImageEnhance, ImageOps
+
+    width, height = image.size
+
+    def crop_rel(box: tuple[float, float, float, float], scale: int = 4):
+        x1, y1, x2, y2 = box
+        crop = image.crop((int(width * x1), int(height * y1), int(width * x2), int(height * y2)))
+        crop = crop.resize((max(1, crop.width * scale), max(1, crop.height * scale)), Image.Resampling.LANCZOS)
+        gray = ImageOps.grayscale(crop)
+        gray = ImageOps.autocontrast(gray, cutoff=2)
+        gray = ImageEnhance.Contrast(gray).enhance(1.9)
+        return gray
+
+    def ocr_cell(box: tuple[float, float, float, float], psm: int = 7) -> str:
+        whitelist = "0123456789.->＞"
+        config = f'--psm {psm} -c tessedit_char_whitelist="{whitelist}"'
+        text = pytesseract.image_to_string(crop_rel(box), lang="eng", config=config)
+        text = unicodedata.normalize("NFKC", text).replace("＞", ">")
+        return re.sub(r"\s+", " ", text).strip()
+
+    def ocr_jpn(box: tuple[float, float, float, float]) -> str:
+        try:
+            text = pytesseract.image_to_string(crop_rel(box, scale=3), lang="jpn+eng", config="--psm 6")
+        except Exception:
+            text = pytesseract.image_to_string(crop_rel(box, scale=3), lang="eng", config="--psm 6")
+        return unicodedata.normalize("NFKC", text)
+
+    header_text = ocr_jpn((0.00, 0.00, 1.00, 0.08))
+    if "3連単" in header_text or "3連" in header_text and "単" in header_text:
+        ticket = "3連単"
+        combo_count = 3
+    elif "3連複" in header_text or "3連" in header_text and "複" in header_text:
+        ticket = "3連複"
+        combo_count = 3
+    elif "馬単" in header_text:
+        ticket = "馬単"
+        combo_count = 2
+    elif "馬連" in header_text:
+        ticket = "馬連"
+        combo_count = 2
+    elif "ワイド" in header_text:
+        ticket = "ワイド"
+        combo_count = 2
+    else:
+        # A three-horse table with "1頭目/2頭目/3頭目" and arrow separators is
+        # most commonly the selected 3連単 tab.
+        ticket = "3連単"
+        combo_count = 3
+
+    # Geometry measured from netkeiba's long popularity-list screenshots.
+    # First data row is just below the column header; the row height is stable
+    # across 100 displayed rows.
+    top_center = 0.1245
+    row_h = 0.00875
+    cell_h = 0.0068
+    max_rows = min(100, max(1, int((0.988 - top_center) / row_h)))
+    result: dict[str, float] = {}
+    transcript: list[str] = [f"【券種別人気順OCR】券種推定: {ticket}", header_text[:300]]
+    empty_streak = 0
+    for idx in range(max_rows):
+        center = top_center + row_h * idx
+        y1, y2 = center - cell_h / 2, center + cell_h / 2
+        combo_text = ocr_cell((0.085, y1, 0.245, y2), psm=7)
+        odds_text = ocr_cell((0.255, y1, 0.355, y2), psm=7)
+        combo = [str(int(float(v))) for v in re.findall(r"\d+(?:\.\d+)?", combo_text)]
+        odds_match = re.search(r"\d+(?:\.\d+)?", odds_text)
+        if len(combo) >= combo_count and odds_match:
+            key = _odds_lookup_key(ticket, combo[:combo_count])
+            odds = float(odds_match.group())
+            result[key] = odds
+            transcript.append(f"{idx + 1}人気 {key} {odds:g}")
+            empty_streak = 0
+        else:
+            empty_streak += 1
+            if idx > 15 and empty_streak >= 8:
+                break
+    if not result:
+        raise RuntimeError("券種別人気順オッズ表を読み取れませんでした。表示倍率・列の切れ・画像解像度を確認してください。")
+    return result, "\n".join(transcript[:240])
 
 
 def fetch_netkeiba_popular_odds(url: str, timeout: float = 12.0) -> tuple[dict[str, float], str]:
