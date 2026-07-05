@@ -1372,7 +1372,13 @@ def step4():
             except Exception as exc:
                 st.error(f"URLからオッズを取得できませんでした: {exc}")
                 st.caption("ログインが必要なページ、アクセス制限、ページ形式変更の可能性があります。その場合は画像アップロードかテキスト貼り付けを使ってください。")
-        odds_image = st.file_uploader("オッズ表画像をアップロード", type=["png", "jpg", "jpeg", "webp"], key="popular_odds_image")
+        odds_images = st.file_uploader(
+            "オッズ表画像をアップロード（複数可）",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            key="popular_odds_image",
+            help="全券種まとめ画像より、単勝・馬連・ワイド・3連複など券種別の上位人気スクショを複数入れる方が精度が上がります。",
+        )
         ocr_mode = st.radio(
             "画像読み取り方法",
             ["固定レイアウトOCR", "無料OCRを優先", "OpenAI画像解析"],
@@ -1380,41 +1386,63 @@ def step4():
             help="固定レイアウトOCRはnetkeibaの人気上位表スクショ向きです。通常はこちらを使います。",
         )
         image_parsed = race.get("popular_odds_image_parsed", {})
-        if odds_image:
-            st.image(odds_image.getvalue(), caption="オッズ表画像", width="stretch")
+        if odds_images:
+            st.caption(f"{len(odds_images)}枚のオッズ画像を選択中。券種別スクショを複数入れると、馬連・ワイド・3連複の実オッズに近づきます。")
+            preview_cols = st.columns(min(3, len(odds_images)))
+            for idx, odds_image in enumerate(odds_images[:3]):
+                with preview_cols[idx % len(preview_cols)]:
+                    st.image(odds_image.getvalue(), caption=getattr(odds_image, "name", f"画像{idx + 1}"), width="stretch")
+            if len(odds_images) > 3:
+                st.caption(f"ほか {len(odds_images) - 3} 枚")
             if st.button("画像から人気上位オッズを読み取る", icon=":material/image_search:"):
                 try:
-                    image_bytes_data = odds_image.getvalue()
-                    transcript = ""
-                    parsed = {}
-                    method = ""
-                    if ocr_mode == "固定レイアウトOCR":
-                        try:
-                            parsed, transcript = parse_netkeiba_popular_odds_image_layout(image_bytes_data)
-                            method = "固定レイアウトOCR"
-                        except Exception as layout_exc:
-                            st.warning(f"固定レイアウトOCRでは読み取りきれなかったため、無料OCRへ切り替えます: {layout_exc}")
-                            ocr_mode = "無料OCRを優先"
-                    if ocr_mode == "無料OCRを優先" and not parsed:
-                        try:
-                            transcript = ocr_text_with_macos_vision(image_bytes_data) if IS_MAC else ocr_popular_odds_image_with_tesseract(image_bytes_data)
-                            parsed = parse_popular_odds_snapshot(transcript)
-                            method = "Mac標準OCR" if IS_MAC else "Tesseract無料OCR"
-                        except Exception as local_exc:
-                            if not api_key:
-                                raise local_exc
-                            st.warning(f"無料OCRでは読み取りきれなかったため、OpenAI画像解析へ切り替えます: {local_exc}")
-                    if not parsed and api_key:
-                        parsed, transcript = parse_popular_odds_image_with_openai(image_bytes_data, odds_image.type or "image/png", api_key, model)
-                        method = "OpenAI画像解析"
-                    elif ocr_mode == "OpenAI画像解析":
-                        raise ValueError("OpenAI画像解析を使うにはOPENAI_API_KEYが必要です。")
-                    if not parsed:
+                    merged_parsed = {}
+                    transcript_parts = []
+                    method_parts = []
+                    errors = []
+                    for odds_image in odds_images:
+                        image_bytes_data = odds_image.getvalue()
+                        local_mode = ocr_mode
+                        transcript = ""
+                        parsed = {}
+                        method = ""
+                        name = getattr(odds_image, "name", "画像")
+                        if local_mode == "固定レイアウトOCR":
+                            try:
+                                parsed, transcript = parse_netkeiba_popular_odds_image_layout(image_bytes_data)
+                                method = "固定レイアウトOCR"
+                            except Exception as layout_exc:
+                                errors.append(f"{name}: 固定レイアウトOCR不可 → 無料OCRへ切替（{layout_exc}）")
+                                local_mode = "無料OCRを優先"
+                        if local_mode == "無料OCRを優先" and not parsed:
+                            try:
+                                transcript = ocr_text_with_macos_vision(image_bytes_data) if IS_MAC else ocr_popular_odds_image_with_tesseract(image_bytes_data)
+                                parsed = parse_popular_odds_snapshot(transcript)
+                                method = "Mac標準OCR" if IS_MAC else "Tesseract無料OCR"
+                            except Exception as local_exc:
+                                if not api_key:
+                                    raise local_exc
+                                errors.append(f"{name}: 無料OCR不可 → OpenAI画像解析へ切替（{local_exc}）")
+                        if not parsed and api_key:
+                            parsed, transcript = parse_popular_odds_image_with_openai(image_bytes_data, odds_image.type or "image/png", api_key, model)
+                            method = "OpenAI画像解析"
+                        elif local_mode == "OpenAI画像解析":
+                            raise ValueError("OpenAI画像解析を使うにはOPENAI_API_KEYが必要です。")
+                        if parsed:
+                            merged_parsed.update(parsed)
+                            transcript_parts.append(f"【{name} / {method or '画像OCR'}】\n{transcript}")
+                            method_parts.append(method or "画像OCR")
+                        else:
+                            errors.append(f"{name}: オッズ表を読み取れませんでした")
+                    if not merged_parsed:
                         raise ValueError("画像内のオッズ表を読み取れませんでした。画像の解像度や表示範囲を確認してください。")
-                    race["popular_odds_snapshot_text"] = transcript
-                    race["popular_odds_image_method"] = method or "画像OCR"
-                    race["popular_odds_image_parsed"] = parsed
-                    image_parsed = parsed
+                    if errors:
+                        for message in errors[:5]:
+                            st.warning(message)
+                    race["popular_odds_snapshot_text"] = "\n\n".join(transcript_parts)
+                    race["popular_odds_image_method"] = " / ".join(sorted(set(method_parts))) or "画像OCR"
+                    race["popular_odds_image_parsed"] = merged_parsed
+                    image_parsed = merged_parsed
                     persist("オッズ表画像の読み取り結果を保存しました")
                     st.rerun()
                 except Exception as exc:

@@ -1819,8 +1819,8 @@ def _bet_combinations(rows: list[dict], marks: dict, bet_type: str) -> list[list
 
 def _estimated_odds(bet_type: str, rs: list[dict]) -> float:
     singles = [max(1.1, _float(r.get("単勝オッズ"), 8)) for r in rs]
-    powers = {"単勝": 1.0, "複勝": .42, "枠連": .48, "馬連": .58, "ワイド": .40, "馬単": .72, "3連複": .72, "3連単": .96}
-    discounts = {"単勝": 1.0, "複勝": .72, "枠連": .82, "馬連": .90, "ワイド": .70, "馬単": 1.05, "3連複": 1.15, "3連単": 1.35}
+    powers = {"単勝": 1.0, "複勝": .42, "枠連": .50, "馬連": .66, "ワイド": .42, "馬単": .80, "3連複": .86, "3連単": 1.08}
+    discounts = {"単勝": 1.0, "複勝": .72, "枠連": .88, "馬連": 1.08, "ワイド": .74, "馬単": 1.26, "3連複": 1.55, "3連単": 1.95}
     return max(1.1, math.prod(singles) ** powers[bet_type] * discounts[bet_type])
 
 
@@ -1971,10 +1971,10 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
     skipped: list[dict] = []
 
     style_settings = {
-        "的中30%型": {"max_points": 5, "wide_limit": 1, "quinella_limit": 2, "triple_limit": 0, "win_weight": 1.06, "min_wide_odds": 2.4, "target_hit": 33},
-        "標準": {"max_points": 6, "wide_limit": 2, "quinella_limit": 2, "triple_limit": 1, "win_weight": 1.00, "min_wide_odds": 2.8, "target_hit": 31},
-        "回収重視": {"max_points": 6, "wide_limit": 1, "quinella_limit": 3, "triple_limit": 2, "win_weight": .88, "min_wide_odds": 3.0, "target_hit": 28},
-        "高回収": {"max_points": 7, "wide_limit": 0, "quinella_limit": 2, "triple_limit": 3, "win_weight": .78, "min_wide_odds": 99.0, "target_hit": 24},
+        "的中30%型": {"max_points": 6, "wide_limit": 1, "quinella_limit": 3, "triple_limit": 1, "win_weight": 1.02, "min_wide_odds": 2.2, "target_hit": 33},
+        "標準": {"max_points": 8, "wide_limit": 2, "quinella_limit": 3, "triple_limit": 2, "win_weight": .98, "min_wide_odds": 2.4, "target_hit": 31},
+        "回収重視": {"max_points": 9, "wide_limit": 1, "quinella_limit": 4, "triple_limit": 4, "win_weight": .82, "min_wide_odds": 2.6, "target_hit": 28},
+        "高回収": {"max_points": 10, "wide_limit": 0, "quinella_limit": 3, "triple_limit": 6, "win_weight": .72, "min_wide_odds": 99.0, "target_hit": 24},
     }
     setting = style_settings.get(style, style_settings["標準"])
 
@@ -1983,12 +1983,14 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
         if any(n not in by_no for n in nums):
             return
         rs = [by_no[n] for n in nums]
+        has_live_odds = key in odds_map
         odds = float(odds_map.get(key, _estimated_odds(ticket, rs)))
-        if ticket == "ワイド" and odds < max(min_odds, setting["min_wide_odds"]):
+        wide_floor = max(min_odds, setting["min_wide_odds"] if has_live_odds else min(setting["min_wide_odds"], 2.2))
+        if ticket == "ワイド" and odds < wide_floor:
             skipped.append({
-                "買い目": key, "券種": ticket, "現在オッズ": round(odds, 2), "オッズ区分": "取得値" if key in odds_map else "推定値",
+                "買い目": key, "券種": ticket, "現在オッズ": round(odds, 2), "オッズ区分": "取得値" if has_live_odds else "推定値",
                 "的中期待度": 0, "回収期待指数": 0, "買い目スコア": 0,
-                "狙い": reason, "見送り理由": f"ワイド配当が低くトリガミになりやすい（目安{setting['min_wide_odds']:.1f}倍未満）",
+                "狙い": reason, "見送り理由": f"ワイド配当が低くトリガミになりやすい（目安{wide_floor:.1f}倍未満）",
             })
             return
         confidence = sum(r["本命スコア"] for r in rs) / len(rs) / 5
@@ -2001,7 +2003,7 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
         utility = (hit_index * .48 + value_index * .52) * weight
         item = {
             "買い目": key, "券種": ticket, "買い目スコア": round(utility / 100, 4),
-            "現在オッズ": round(odds, 2), "オッズ区分": "取得値" if key in odds_map else "推定値",
+            "現在オッズ": round(odds, 2), "オッズ区分": "取得値" if has_live_odds else "推定値",
             "的中期待度": round(hit_index, 1), "回収期待指数": round(value_index, 1),
             "狙い": f"{role}: {reason}", "見送り理由": "", "買い目役割": role,
         }
@@ -2028,15 +2030,32 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
         for left, right in triple_pairs[:triple_limit]:
             add("3連複", [anchor, left, right], .64 if style != "高回収" else .92, "軸が3着以内に残る場合の配当上積み", "上積み")
 
-    role_order = {"メイン": 0, "上積み": 1, "保険": 2}
-    selected = sorted(
-        candidates,
-        key=lambda x: (role_order.get(str(x.get("買い目役割", "")), 9), -x["買い目スコア"]),
-    )[:min(max(1, budget // unit), int(setting["max_points"]))]
+    max_points = min(max(1, budget // unit), int(setting["max_points"]))
+    by_role = {
+        role: sorted([item for item in candidates if item.get("買い目役割") == role], key=lambda x: x["買い目スコア"], reverse=True)
+        for role in ["メイン", "上積み", "保険"]
+    }
+    selected: list[dict] = []
+    role_targets = {
+        "メイン": min(len(by_role["メイン"]), max(2, max_points // 2)),
+        "上積み": min(len(by_role["上積み"]), max(1, max_points // 3)),
+        "保険": min(len(by_role["保険"]), 1 if style in {"高回収", "回収重視"} else 2),
+    }
+    for role in ["メイン", "上積み", "保険"]:
+        selected.extend(by_role[role][:role_targets[role]])
+    if len(selected) < max_points:
+        selected_keys = {item["買い目"] for item in selected}
+        rest = sorted([item for item in candidates if item["買い目"] not in selected_keys], key=lambda x: x["買い目スコア"], reverse=True)
+        selected.extend(rest[:max_points - len(selected)])
+    selected = selected[:max_points]
     if not selected:
         return [], skipped
     usable = (budget // unit) * unit
-    role_share = {"メイン": .72 if style != "高回収" else .56, "上積み": .18 if style != "的中30%型" else .08, "保険": .10 if style != "高回収" else .04}
+    role_share = {
+        "メイン": .66 if style not in {"高回収", "回収重視"} else .52,
+        "上積み": .24 if style != "的中30%型" else .14,
+        "保険": .10 if style != "高回収" else .04,
+    }
     role_buckets: dict[str, list[dict]] = {}
     for item in selected:
         role_buckets.setdefault(str(item.get("買い目役割", "メイン")), []).append(item)
