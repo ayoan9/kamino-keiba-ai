@@ -1,4 +1,4 @@
-from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
+from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_odds_calibration, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, parse_single_odds_text, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile
 from horse_ai.historical import _available_month_tokens, _day_races, _result_detail, aggregate_history
 from horse_ai.jra_fetcher import _anchor_actions, _race_identity, _single_odds, _tables
 
@@ -320,6 +320,28 @@ def test_external_betting_journal_is_added_to_ai_prompt(tmp_path):
     prompt = prediction_policy_prompt(profile)
     assert "外部買い目ノート1件" in prompt
     assert "小回り重馬場は位置取りを重視" in prompt
+
+
+def test_betting_journal_learns_odds_calibration(tmp_path):
+    path = tmp_path / "prediction_profile.json"
+    profile = add_betting_journal_entry({
+        "レース": "京都11R",
+        "券種": "馬連",
+        "買い目": "馬連 1-3 1000円",
+        "購入額": 1000,
+        "払戻額": 0,
+        "単勝オッズメモ": "1 2.4\n3 7.8",
+        "実オッズメモ": "馬連 1-3 28.0",
+        "振り返り": "実際の馬連は単勝支持率からの推定より高かった",
+    }, str(path))
+    calibration = profile["odds_calibration"]
+    assert calibration["samples"] == 1
+    assert calibration["ticket_multipliers"]["馬連"]["multiplier"] > 1.0
+    assert "馬連" in prediction_policy_prompt(profile)
+
+
+def test_parse_single_odds_text_accepts_simple_lines():
+    assert parse_single_odds_text("1番 ランスオブカオス 2.4\n3 キープカルム 7.8") == {"1": 2.4, "3": 7.8}
 
 
 def test_betting_journal_keeps_horses_and_infers_ticket_type(tmp_path):

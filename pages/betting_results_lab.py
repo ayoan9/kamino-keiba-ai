@@ -602,6 +602,25 @@ if section == "出馬表取込・選択入力":
             source = st.selectbox("購入・記録元", source_options, index=option_index(source_options, draft_form.get("source", "netkeiba")), key="candidate_source")
             candidate_return = st.number_input("払戻額", min_value=0, step=100, value=int(draft_form.get("return", 0) or 0), key="candidate_return")
             st.caption("出走馬の読み取りがズレた場合は、左の出走馬欄を直接直せます。買い目候補は下の選択肢から選びます。")
+        with st.expander("オッズ補正用データを入れる（任意）", expanded=False):
+            st.caption("単勝オッズと、実際の連系オッズ・払戻を少しずつ貯めると、次回以降の買い目提案で想定配当を現実寄りに補正します。")
+            odds_c1, odds_c2 = st.columns(2)
+            with odds_c1:
+                single_odds_memo = st.text_area(
+                    "単勝オッズメモ",
+                    value=str(draft_form.get("single_odds_memo", "") or ""),
+                    height=120,
+                    placeholder="例）\n1 2.4\n2 25.0\n3 7.8",
+                    key="candidate_single_odds_memo",
+                )
+            with odds_c2:
+                actual_odds_memo = st.text_area(
+                    "実オッズ・払戻メモ",
+                    value=str(draft_form.get("actual_odds_memo", "") or ""),
+                    height=120,
+                    placeholder="例）\n馬連 1-3 18.6\nワイド 1-3 580円\n3連複 1-3-7 12340円",
+                    key="candidate_actual_odds_memo",
+                )
         horse_options = horse_choices_from_text(candidate_horses, horses)
         horse_multi_options = horse_options[1:]
 
@@ -761,6 +780,8 @@ if section == "出馬表取込・選択入力":
             "form": {
                 "source": source,
                 "return": int(candidate_return),
+                "single_odds_memo": single_odds_memo,
+                "actual_odds_memo": actual_odds_memo,
                 "bet_rows": bet_rows,
                 "bets_text": candidate_bets,
                 "stake": int(candidate_stake),
@@ -794,6 +815,8 @@ if section == "出馬表取込・選択入力":
                     "買い目": candidate_bets,
                     "購入額": int(candidate_stake),
                     "払戻額": int(candidate_return),
+                    "単勝オッズメモ": single_odds_memo,
+                    "実オッズメモ": actual_odds_memo,
                     "買った理由": joined_selected(bought_reason),
                     "結果": "\n".join(result_lines),
                     "振り返り": structured_review,
@@ -816,6 +839,13 @@ if section == "手入力":
     race_label = st.text_input("レース", value=str(manual_form.get("race_label", "") or ""), placeholder="例）2026-06-28 福島11R ラジオNIKKEI賞")
     horses_text = st.text_area("出走馬", value=str(manual_form.get("horses_text", "") or ""), height=120, placeholder="例）5 ファイアンクランツ\n8 センツブラッド\n14 トータルクラリティ")
     bets = st.text_area("買い目", value=str(manual_form.get("bets", "") or ""), height=120, placeholder="例）ワイド 5-8 1,000円\n馬連 5-8 500円")
+    with st.expander("オッズ補正用データを入れる（任意）", expanded=False):
+        st.caption("単勝オッズと実オッズ・払戻を残すと、次回以降の連系オッズ推定に反映します。")
+        mo1, mo2 = st.columns(2)
+        with mo1:
+            manual_single_odds_memo = st.text_area("単勝オッズメモ", value=str(manual_form.get("single_odds_memo", "") or ""), height=110, placeholder="例）\n1 2.4\n2 25.0\n3 7.8")
+        with mo2:
+            manual_actual_odds_memo = st.text_area("実オッズ・払戻メモ", value=str(manual_form.get("actual_odds_memo", "") or ""), height=110, placeholder="例）\n馬連 1-3 18.6\nワイド 1-3 580円")
     c1, c2, c3 = st.columns(3)
     with c1:
         manual_source_options = ["netkeiba", "IPAT", "JRA", "他ツール", "手入力"]
@@ -832,6 +862,8 @@ if section == "手入力":
             "race_label": race_label,
             "horses_text": horses_text,
             "bets": bets,
+            "single_odds_memo": manual_single_odds_memo,
+            "actual_odds_memo": manual_actual_odds_memo,
             "source": source,
             "stake_input": int(stake_input),
             "return_input": int(return_input),
@@ -850,6 +882,8 @@ if section == "手入力":
                 "買い目": bets,
                 "購入額": int(stake_input),
                 "払戻額": int(return_input),
+                "単勝オッズメモ": manual_single_odds_memo,
+                "実オッズメモ": manual_actual_odds_memo,
                 "結果": result,
                 "振り返り": review,
                 "次回への学び": review,

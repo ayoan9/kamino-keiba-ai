@@ -518,12 +518,14 @@ def load_prediction_profile(path: str = "data/prediction_profile.json") -> dict:
         "hit_count": 0,
         "patterns": [],
     }
-    default = {"policy": "", "adjustments": {k: 0.0 for k in SCORE_KEYS}, "learning_samples": 0, "result_learning": default_result_learning, "betting_journal": default_betting_journal, "updated_at": ""}
+    default_odds_calibration = {"ticket_multipliers": {}, "samples": 0, "updated_at": ""}
+    default = {"policy": "", "adjustments": {k: 0.0 for k in SCORE_KEYS}, "learning_samples": 0, "result_learning": default_result_learning, "betting_journal": default_betting_journal, "odds_calibration": default_odds_calibration, "updated_at": ""}
     def merged_profile(loaded: dict) -> dict:
         result_learning = {**default_result_learning, **loaded.get("result_learning", {})}
         result_learning["category_signals"] = {**default_result_learning["category_signals"], **result_learning.get("category_signals", {})}
         betting_journal = {**default_betting_journal, **loaded.get("betting_journal", {})}
-        return {**default, **loaded, "adjustments": {**default["adjustments"], **loaded.get("adjustments", {})}, "result_learning": result_learning, "betting_journal": betting_journal}
+        odds_calibration = {**default_odds_calibration, **loaded.get("odds_calibration", {})}
+        return {**default, **loaded, "adjustments": {**default["adjustments"], **loaded.get("adjustments", {})}, "result_learning": result_learning, "betting_journal": betting_journal, "odds_calibration": odds_calibration}
     if str(path) == "data/prediction_profile.json":
         cloud_profile = load_cloud_json("profile", "prediction_profile")
         if isinstance(cloud_profile, dict):
@@ -606,6 +608,19 @@ def prediction_policy_prompt(profile: dict) -> str:
         patterns = [str(x) for x in betting_journal.get("patterns", [])[-8:] if str(x).strip()]
         if patterns:
             sections.append("外部買い目からの学び:\n- " + "\n- ".join(patterns))
+    odds_calibration = profile.get("odds_calibration", {})
+    multipliers = odds_calibration.get("ticket_multipliers", {}) if isinstance(odds_calibration, dict) else {}
+    if multipliers:
+        parts = []
+        for ticket, data in sorted(multipliers.items()):
+            if not isinstance(data, dict):
+                continue
+            count = int(data.get("count", 0) or 0)
+            multiplier = float(data.get("multiplier", 1) or 1)
+            if count:
+                parts.append(f"{ticket}:{multiplier:.2f}倍補正/{count}件")
+        if parts:
+            sections.append("連系オッズ推定の個人補正: " + "、".join(parts[:6]) + "。実績ラボの単勝オッズ・実オッズから推定配当のズレを補正する。")
     return "\n".join(sections)
 
 
@@ -637,6 +652,8 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
         "購入額": stake,
         "払戻額": payout,
         "収支": payout - stake,
+        "単勝オッズメモ": str(entry.get("単勝オッズメモ", "") or entry.get("単勝オッズ", "")).strip(),
+        "実オッズメモ": str(entry.get("実オッズメモ", "") or entry.get("購入時オッズ", "") or entry.get("払戻メモ", "")).strip(),
         "買った理由": str(entry.get("買った理由", "")).strip(),
         "結果": str(entry.get("結果", "")).strip(),
         "振り返り": str(entry.get("振り返り", "")).strip(),
@@ -668,6 +685,7 @@ def add_betting_journal_entry(entry: dict, path: str = "data/prediction_profile.
         patterns.append(" / ".join(pattern_parts))
         journal["patterns"] = patterns[-40:]
     profile["betting_journal"] = journal
+    profile["odds_calibration"] = learn_odds_calibration(profile)
     profile["updated_at"] = datetime.now().isoformat()
     profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1817,11 +1835,132 @@ def _bet_combinations(rows: list[dict], marks: dict, bet_type: str) -> list[list
     return ordered
 
 
-def _estimated_odds(bet_type: str, rs: list[dict]) -> float:
+def parse_single_odds_text(text: str) -> dict[str, float]:
+    """Parse simple single-odds notes such as `1 3.2` or `1番 ランス 2.4`."""
+    odds: dict[str, float] = {}
+    for raw_line in str(text or "").splitlines():
+        line = unicodedata.normalize("NFKC", raw_line).replace(",", "").strip()
+        if not line:
+            continue
+        no_match = re.search(r"(?:^|[^\d])(\d{1,2})(?:番|枠)?(?:[^\d.]|$)", line)
+        if not no_match:
+            continue
+        numbers = re.findall(r"\d+(?:\.\d+)?", line)
+        if len(numbers) < 2:
+            continue
+        no = str(int(float(no_match.group(1))))
+        candidates = [float(value) for value in numbers[1:] if float(value) >= 1.0]
+        if not candidates:
+            continue
+        odds[no] = float(candidates[-1])
+    return odds
+
+
+def _parse_actual_odds_text(text: str) -> list[dict[str, Any]]:
+    """Parse combo odds/payout notes.
+
+    Accepted examples:
+    - `馬連 1-2 25.4`
+    - `ワイド 1-2 580円`
+    - `3連複 1-2-3 12,340円`
+    """
+    records: list[dict[str, Any]] = []
+    for raw_line in str(text or "").splitlines():
+        line = unicodedata.normalize("NFKC", raw_line).replace(",", "").strip()
+        if not line:
+            continue
+        ticket = next((kind for kind in ALL_BET_TYPES if kind in line), "")
+        if not ticket:
+            continue
+        nums = re.findall(r"(?<!\d)(\d{1,2})(?!\d)", line)
+        needed = 1 if ticket in {"単勝", "複勝"} else (3 if ticket in {"3連複", "3連単"} else 2)
+        if len(nums) < needed:
+            continue
+        combo_nums = [str(int(n)) for n in nums[:needed]]
+        yen_match = re.search(r"(\d+(?:\.\d+)?)\s*円", line)
+        decimal_values = [float(value) for value in re.findall(r"\d+\.\d+", line)]
+        if yen_match:
+            actual = float(yen_match.group(1)) / 100
+        elif decimal_values:
+            actual = decimal_values[-1]
+        else:
+            numeric_values = [float(value) for value in re.findall(r"\d+", line)]
+            actual = numeric_values[-1] / 100 if numeric_values and numeric_values[-1] >= 100 else (numeric_values[-1] if numeric_values else 0)
+        if actual >= 1.0:
+            records.append({"券種": ticket, "馬番": combo_nums, "実オッズ": actual})
+    return records
+
+
+def learn_odds_calibration(profile: dict) -> dict:
+    """Learn ticket-type odds multipliers from betting journal notes.
+
+    The app often only has single odds before purchase.  Historical examples
+    with single odds plus actual combo odds let us correct systematic under/over
+    estimation for quinella, wide, trifecta, etc.
+    """
+    entries = profile.get("betting_journal", {}).get("entries", []) if isinstance(profile, dict) else []
+    ratios: dict[str, list[float]] = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        singles = parse_single_odds_text(str(entry.get("単勝オッズメモ", "") or entry.get("単勝オッズ", "")))
+        if not singles:
+            continue
+        actual_records = _parse_actual_odds_text(str(entry.get("実オッズメモ", "") or entry.get("購入時オッズ", "") or entry.get("払戻メモ", "")))
+        for record in actual_records:
+            ticket = str(record.get("券種", ""))
+            nums = [str(n) for n in record.get("馬番", [])]
+            if ticket not in ALL_BET_TYPES or ticket in {"単勝", "複勝"}:
+                continue
+            if any(n not in singles for n in nums):
+                continue
+            estimated = _estimated_odds(ticket, [{"単勝オッズ": singles[n]} for n in nums], None)
+            if estimated <= 0:
+                continue
+            ratio = max(.45, min(3.5, float(record.get("実オッズ", 0) or 0) / estimated))
+            ratios.setdefault(ticket, []).append(ratio)
+    multipliers: dict[str, dict[str, Any]] = {}
+    total_samples = 0
+    for ticket, values in ratios.items():
+        if not values:
+            continue
+        sorted_values = sorted(values)
+        median = sorted_values[len(sorted_values) // 2]
+        count = len(values)
+        # Start useful even with a few races, but avoid one outlier taking over.
+        confidence = min(1.0, .35 + count / 10)
+        multiplier = 1 + (median - 1) * confidence
+        multipliers[ticket] = {
+            "multiplier": round(max(.55, min(3.0, multiplier)), 3),
+            "raw_median": round(median, 3),
+            "count": count,
+        }
+        total_samples += count
+    return {
+        "ticket_multipliers": multipliers,
+        "samples": total_samples,
+        "updated_at": datetime.now().isoformat(timespec="seconds") if total_samples else "",
+    }
+
+
+def _odds_calibration_multiplier(bet_type: str, calibration: dict | None) -> float:
+    if not isinstance(calibration, dict):
+        return 1.0
+    data = calibration.get("ticket_multipliers", {}).get(bet_type, {})
+    if not isinstance(data, dict):
+        return 1.0
+    try:
+        return max(.55, min(3.0, float(data.get("multiplier", 1) or 1)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _estimated_odds(bet_type: str, rs: list[dict], odds_calibration: dict | None = None) -> float:
     singles = [max(1.1, _float(r.get("単勝オッズ"), 8)) for r in rs]
     powers = {"単勝": 1.0, "複勝": .42, "枠連": .50, "馬連": .66, "ワイド": .42, "馬単": .80, "3連複": .86, "3連単": 1.08}
     discounts = {"単勝": 1.0, "複勝": .72, "枠連": .88, "馬連": 1.08, "ワイド": .74, "馬単": 1.26, "3連複": 1.55, "3連単": 1.95}
-    return max(1.1, math.prod(singles) ** powers[bet_type] * discounts[bet_type])
+    base = max(1.1, math.prod(singles) ** powers[bet_type] * discounts[bet_type])
+    return max(1.1, base * _odds_calibration_multiplier(bet_type, odds_calibration))
 
 
 def _odds_lookup_key(bet_type: str, nums: list[str]) -> str:
@@ -1832,7 +1971,7 @@ def _odds_lookup_key(bet_type: str, nums: list[str]) -> str:
     return f"{bet_type} {'-'.join(normalized)}"
 
 
-def optimize_bets(rows: list[dict], marks: dict, budget: int, unit: int, types: list[str], mode: str, max_bets: int, min_odds: float, odds_map: dict[str, float] | None = None) -> tuple[list[dict], list[dict]]:
+def optimize_bets(rows: list[dict], marks: dict, budget: int, unit: int, types: list[str], mode: str, max_bets: int, min_odds: float, odds_map: dict[str, float] | None = None, odds_calibration: dict | None = None) -> tuple[list[dict], list[dict]]:
     if not rows or budget < unit: return [], []
     odds_map = odds_map or {}
     by_no = {str(r["馬番"]): r for r in rows}; anchor = next((n for n, m in marks.items() if m == "◎"), str(rows[0]["馬番"]))
@@ -1851,7 +1990,7 @@ def optimize_bets(rows: list[dict], marks: dict, budget: int, unit: int, types: 
             value = sum(r["妙味スコア"] for r in rs) / len(rs) / 5
             relation = 1.0 if anchor in nums else .55
             score = confidence * aggression[0] + value * aggression[1] + relation * aggression[2]
-            default_odds = _estimated_odds(bet_type, rs)
+            default_odds = _estimated_odds(bet_type, rs, odds_calibration)
             has_live_odds = key in odds_map
             odds = float(odds_map.get(key, default_odds))
             hit_factor = {"単勝": .52, "複勝": .82, "枠連": .56, "馬連": .48, "ワイド": .70, "馬単": .36, "3連複": .32, "3連単": .17}[bet_type]
@@ -1938,7 +2077,7 @@ def _portfolio_summary(bets: list[dict], skipped: list[dict]) -> dict:
     return {"点数": len(bets), "的中期待指数": round(avg_hit, 1), "回収期待指数": round(avg_value, 1)}
 
 
-def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None, style: str = "標準") -> tuple[list[dict], list[dict]]:
+def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None, style: str = "標準", odds_calibration: dict | None = None) -> tuple[list[dict], list[dict]]:
     """Build a coherent one-anchor portfolio rather than scattered tickets.
 
     The baseline pattern is the user's practical style:
@@ -1984,7 +2123,7 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
             return
         rs = [by_no[n] for n in nums]
         has_live_odds = key in odds_map
-        odds = float(odds_map.get(key, _estimated_odds(ticket, rs)))
+        odds = float(odds_map.get(key, _estimated_odds(ticket, rs, odds_calibration)))
         wide_floor = max(min_odds, setting["min_wide_odds"] if has_live_odds else min(setting["min_wide_odds"], 2.2))
         if ticket == "ワイド" and odds < wide_floor:
             skipped.append({
@@ -2088,6 +2227,7 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
     if not rows or budget < unit:
         return {}
     preferred_types = _ticket_preferences_from_profile(prediction_profile)
+    odds_calibration = prediction_profile.get("odds_calibration", {}) if isinstance(prediction_profile, dict) else {}
     anchor_styles = {
         "軸セット": ("標準", "単勝・馬連・ワイド中心"),
         "的中30%型": ("的中30%型", "点数を絞り、軸の2着以内を主戦にする"),
@@ -2096,7 +2236,7 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
     }
     plans = {}
     for name, (style, label) in anchor_styles.items():
-        bets, skipped = build_anchor_set_plan(rows, marks, budget, unit, min_odds, odds_map, style=style)
+        bets, skipped = build_anchor_set_plan(rows, marks, budget, unit, min_odds, odds_map, style=style, odds_calibration=odds_calibration)
         if not bets:
             continue
         plans[name] = {
@@ -2108,7 +2248,7 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
         # through the same one-anchor structure.  Avoid returning a random
         # bundle of unrelated tickets just because a historical ticket type did
         # well.
-        bets, skipped = optimize_bets(rows, marks, budget, unit, preferred_types, "標準", min(max(1, budget // unit), 5), min_odds, odds_map)
+        bets, skipped = optimize_bets(rows, marks, budget, unit, preferred_types, "標準", min(max(1, budget // unit), 5), min_odds, odds_map, odds_calibration)
         if bets:
             plans["実績反映"] = {
                 "bets": bets,
