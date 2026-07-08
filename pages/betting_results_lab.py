@@ -28,6 +28,7 @@ from horse_ai.core import (
     parse_betting_history_text,
     parse_inputs,
     save_cloud_json,
+    update_betting_journal_entry,
 )
 
 
@@ -981,17 +982,77 @@ if section == "履歴インポート":
 if section == "登録済み実績一覧":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">登録済み実績一覧</div>', unsafe_allow_html=True)
-    st.caption("保存した振り返りを確認できます。収支管理ではなく、予想ロジックの蓄積用メモとして使います。")
+    st.caption("保存した振り返りを確認・編集できます。払戻額や結果が後から分かった場合も、ここで追記できます。")
     list_limit = st.selectbox("表示件数", [50, 100, 200, 300], index=0, key="journal_list_limit")
-    entries = betting_journal_entries(limit=int(list_limit))
+    profile_for_edit = load_prediction_profile()
+    stored_entries = [item for item in profile_for_edit.get("betting_journal", {}).get("entries", []) if isinstance(item, dict)]
+    indexed_entries = [
+        {"_entry_index": index, **entry}
+        for index, entry in enumerate(stored_entries)
+    ][-int(list_limit):]
+    entries = list(reversed(indexed_entries))
     if entries:
         table = pd.DataFrame(entries)
-        visible_cols = [col for col in ["登録日時", "レース", "出走馬", "情報源", "券種", "買い目", "結果", "買った理由", "振り返り", "次回への学び"] if col in table.columns]
+        visible_cols = [col for col in ["登録日時", "レース", "出走馬", "情報源", "券種", "買い目", "購入額", "払戻額", "収支", "結果", "買った理由", "振り返り", "次回への学び"] if col in table.columns]
         st.dataframe(table[visible_cols], hide_index=True, width="stretch")
+        st.markdown("#### 登録済み実績を編集")
+        options = [
+            f'{i + 1}. {entry.get("レース", "レース未設定")} / {entry.get("買い目", "買い目未設定")} / 払戻{int(entry.get("払戻額", 0) or 0):,}円'
+            for i, entry in enumerate(entries)
+        ]
+        selected_label = st.selectbox("編集する実績", options, key="journal_edit_target")
+        selected_pos = options.index(selected_label)
+        selected_entry = entries[selected_pos]
+        edit_index = int(selected_entry["_entry_index"])
+        with st.form("journal_edit_form"):
+            e1, e2 = st.columns([1, 1])
+            with e1:
+                edit_race = st.text_input("レース", value=str(selected_entry.get("レース", "") or ""))
+                edit_ticket_options = ["", "単勝", "複勝", "枠連", "ワイド", "馬連", "馬単", "3連複", "3連単", "複数券種", "その他"]
+                edit_ticket = st.selectbox("券種", edit_ticket_options, index=option_index(edit_ticket_options, selected_entry.get("券種", "")))
+                edit_bets = st.text_area("買い目", value=str(selected_entry.get("買い目", "") or ""), height=110)
+                edit_horses = st.text_area("出走馬", value=str(selected_entry.get("出走馬", "") or ""), height=110)
+            with e2:
+                edit_source_options = ["netkeiba", "IPAT", "JRA", "他ツール", "手入力", ""]
+                edit_source = st.selectbox("情報源", edit_source_options, index=option_index(edit_source_options, selected_entry.get("情報源", "")))
+                edit_stake = st.number_input("購入額", min_value=0, step=100, value=to_int(selected_entry.get("購入額", 0)))
+                edit_payout = st.number_input("払戻額", min_value=0, step=100, value=to_int(selected_entry.get("払戻額", 0)))
+                edit_result = st.text_area("結果", value=str(selected_entry.get("結果", "") or ""), height=85, placeholder="例）的中 / 1着 5番、2着 8番")
+            with st.expander("オッズ補正メモも編集する", expanded=False):
+                oe1, oe2 = st.columns(2)
+                with oe1:
+                    edit_single_odds = st.text_area("単勝オッズメモ", value=str(selected_entry.get("単勝オッズメモ", "") or ""), height=110)
+                with oe2:
+                    edit_actual_odds = st.text_area("実オッズ・払戻メモ", value=str(selected_entry.get("実オッズメモ", "") or ""), height=110)
+            edit_reason = st.text_area("買った理由", value=str(selected_entry.get("買った理由", "") or ""), height=80)
+            edit_review = st.text_area("振り返り", value=str(selected_entry.get("振り返り", "") or ""), height=100)
+            edit_lesson = st.text_area("次回への学び", value=str(selected_entry.get("次回への学び", "") or ""), height=80)
+            submitted = st.form_submit_button("この内容で更新", type="primary")
+        if submitted:
+            try:
+                updated = update_betting_journal_entry(edit_index, {
+                    "レース": edit_race,
+                    "出走馬": edit_horses,
+                    "情報源": edit_source,
+                    "券種": edit_ticket,
+                    "買い目": edit_bets,
+                    "購入額": int(edit_stake),
+                    "払戻額": int(edit_payout),
+                    "結果": edit_result,
+                    "単勝オッズメモ": edit_single_odds,
+                    "実オッズメモ": edit_actual_odds,
+                    "買った理由": edit_reason,
+                    "振り返り": edit_review,
+                    "次回への学び": edit_lesson,
+                })
+                st.success(f'更新しました。累計{updated.get("betting_journal", {}).get("count", 0)}件の集計とオッズ補正も再計算しました。')
+                st.rerun()
+            except Exception as exc:
+                st.error(f"更新できませんでした: {exc}")
         if st.toggle("CSV書き出しを表示", value=False, key="show_journal_export"):
             st.download_button(
                 "蓄積データを書き出す",
-                table.to_csv(index=False).encode("utf-8-sig"),
+                table.drop(columns=["_entry_index"], errors="ignore").to_csv(index=False).encode("utf-8-sig"),
                 "betting_journal_export.csv",
                 "text/csv",
             )

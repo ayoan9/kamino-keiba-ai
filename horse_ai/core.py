@@ -712,6 +712,99 @@ def add_betting_journal_entries(entries: list[dict], path: str = "data/predictio
     return profile, {"取込": imported, "スキップ": skipped, "エラー": errors, "累計": int(journal.get("count", 0) or 0)}
 
 
+def _rebuild_betting_journal(entries: list[dict]) -> dict:
+    """Recalculate betting-journal aggregates from normalized entries."""
+    normalized_entries = [item for item in entries if isinstance(item, dict)][-200:]
+    journal = {
+        "entries": normalized_entries,
+        "count": len(normalized_entries),
+        "stake_total": 0,
+        "return_total": 0,
+        "profit_total": 0,
+        "hit_count": 0,
+        "patterns": [],
+    }
+    patterns: list[str] = []
+    for entry in normalized_entries:
+        stake = int(entry.get("購入額", 0) or 0)
+        payout = int(entry.get("払戻額", 0) or 0)
+        journal["stake_total"] += stake
+        journal["return_total"] += payout
+        journal["profit_total"] += payout - stake
+        if payout > 0:
+            journal["hit_count"] += 1
+        pattern_parts = []
+        if str(entry.get("券種", "")).strip():
+            pattern_parts.append(f'券種:{entry.get("券種", "")}')
+        if str(entry.get("出走馬", "")).strip():
+            pattern_parts.append("出走馬:" + str(entry.get("出走馬", ""))[:160])
+        if str(entry.get("買った理由", "")).strip():
+            pattern_parts.append("理由:" + str(entry.get("買った理由", "")))
+        if str(entry.get("振り返り", "")).strip():
+            pattern_parts.append("振り返り:" + str(entry.get("振り返り", "")))
+        if str(entry.get("次回への学び", "")).strip():
+            pattern_parts.append("次回:" + str(entry.get("次回への学び", "")))
+        if pattern_parts:
+            patterns.append(" / ".join(pattern_parts))
+    journal["patterns"] = patterns[-40:]
+    return journal
+
+
+def update_betting_journal_entry(entry_index: int, updates: dict, path: str = "data/prediction_profile.json") -> dict:
+    """Update an existing external betting note and rebuild aggregates."""
+    profile = load_prediction_profile(path)
+    journal = profile.setdefault("betting_journal", {})
+    entries = [item for item in journal.get("entries", []) if isinstance(item, dict)]
+    if entry_index < 0 or entry_index >= len(entries):
+        raise IndexError("指定された実績が見つかりません")
+
+    current = dict(entries[entry_index])
+
+    def yen(value) -> int:
+        text = str(value or "").replace(",", "").replace("円", "").strip()
+        try:
+            return int(float(text))
+        except ValueError:
+            return 0
+
+    merged = {**current, **{k: v for k, v in updates.items() if v is not None}}
+    stake = yen(merged.get("購入額", 0))
+    payout = yen(merged.get("払戻額", 0))
+    ticket = str(merged.get("券種", "")).strip()
+    if not ticket:
+        bet_text = unicodedata.normalize("NFKC", str(merged.get("買い目", "")))
+        ticket = next((BETTING_TICKET_ALIASES.get(kind, kind) for kind in BETTING_TICKET_TYPES if kind in bet_text), "")
+
+    entries[entry_index] = {
+        **current,
+        "登録日時": str(merged.get("登録日時", current.get("登録日時", "")) or datetime.now().isoformat(timespec="seconds")),
+        "更新日時": datetime.now().isoformat(timespec="seconds"),
+        "レース": str(merged.get("レース", "")).strip(),
+        "出走馬": str(merged.get("出走馬", "")).strip(),
+        "券種": ticket,
+        "買い目": str(merged.get("買い目", "")).strip(),
+        "購入額": stake,
+        "払戻額": payout,
+        "収支": payout - stake,
+        "単勝オッズメモ": str(merged.get("単勝オッズメモ", "") or merged.get("単勝オッズ", "")).strip(),
+        "実オッズメモ": str(merged.get("実オッズメモ", "") or merged.get("購入時オッズ", "") or merged.get("払戻メモ", "")).strip(),
+        "買った理由": str(merged.get("買った理由", "")).strip(),
+        "結果": str(merged.get("結果", "")).strip(),
+        "振り返り": str(merged.get("振り返り", "")).strip(),
+        "次回への学び": str(merged.get("次回への学び", "")).strip(),
+        "情報源": str(merged.get("情報源", "")).strip(),
+    }
+
+    profile["betting_journal"] = _rebuild_betting_journal(entries)
+    profile["odds_calibration"] = learn_odds_calibration(profile)
+    profile["updated_at"] = datetime.now().isoformat()
+    profile_path = data_path(path); profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    if str(path) == "data/prediction_profile.json":
+        save_cloud_json("profile", "prediction_profile", profile)
+    return profile
+
+
 BETTING_TICKET_TYPES = ["3連単", "三連単", "3連複", "三連複", "馬単", "馬連", "ワイド", "枠連", "複勝", "単勝"]
 BETTING_TICKET_ALIASES = {"三連単": "3連単", "三連複": "3連複"}
 
