@@ -439,7 +439,11 @@ def build_bet_lines(rows: list[dict]) -> tuple[str, int, list[str]]:
                 row.get("3列目", []) if isinstance(row.get("3列目", []), list) else [],
             )
         else:
-            opponents = [row.get(key, "") for key in ("相手1", "相手2", "相手3", "相手4", "相手5")]
+            opponent_values = row.get("相手候補", row.get("相手", []))
+            if not isinstance(opponent_values, list):
+                opponent_values = []
+            opponent_values = list(opponent_values) + [row.get(key, "") for key in [f"相手{i}" for i in range(1, 11)]]
+            opponents = opponent_values
             combos = expand_bet_combos(ticket, method, str(row.get("軸1", "") or ""), str(row.get("軸2", "") or ""), opponents)
         combos = list(dict.fromkeys(combos))
         if not combos:
@@ -646,7 +650,13 @@ if section == "出馬表取込・選択入力":
                     axis1 = st.selectbox("軸1", horse_options, index=option_index(horse_options, saved_row.get("軸1", "")), key=f"candidate_axis1_{idx}")
                 with t4:
                     axis2 = st.selectbox("軸2", horse_options, index=option_index(horse_options, saved_row.get("軸2", "")), key=f"candidate_axis2_{idx}")
-                opponent1 = opponent2 = opponent3 = opponent4 = opponent5 = ""
+                saved_opponents = saved_row.get("相手候補", saved_row.get("相手", []))
+                if not isinstance(saved_opponents, list):
+                    saved_opponents = []
+                saved_opponents = list(dict.fromkeys(
+                    [v for v in saved_opponents if v in horse_multi_options]
+                    + [saved_row.get(f"相手{i}", "") for i in range(1, 11) if saved_row.get(f"相手{i}", "") in horse_multi_options]
+                ))
                 formation1 = saved_row.get("1列目", []) if isinstance(saved_row.get("1列目", []), list) else []
                 formation2 = saved_row.get("2列目", []) if isinstance(saved_row.get("2列目", []), list) else []
                 formation3 = saved_row.get("3列目", []) if isinstance(saved_row.get("3列目", []), list) else []
@@ -662,17 +672,15 @@ if section == "出馬表取込・選択入力":
                     with amount_col:
                         amount = st.number_input("1点金額", min_value=0, step=100, value=to_int(saved_row.get("1点金額", 0)), key=f"candidate_amount_{idx}")
                 else:
-                    o1, o2, o3, o4, o5, amount_col = st.columns([1, 1, 1, 1, 1, 1])
-                    with o1:
-                        opponent1 = st.selectbox("相手1", horse_options, index=option_index(horse_options, saved_row.get("相手1", "")), key=f"candidate_opp1_{idx}")
-                    with o2:
-                        opponent2 = st.selectbox("相手2", horse_options, index=option_index(horse_options, saved_row.get("相手2", "")), key=f"candidate_opp2_{idx}")
-                    with o3:
-                        opponent3 = st.selectbox("相手3", horse_options, index=option_index(horse_options, saved_row.get("相手3", "")), key=f"candidate_opp3_{idx}")
-                    with o4:
-                        opponent4 = st.selectbox("相手4", horse_options, index=option_index(horse_options, saved_row.get("相手4", "")), key=f"candidate_opp4_{idx}")
-                    with o5:
-                        opponent5 = st.selectbox("相手5", horse_options, index=option_index(horse_options, saved_row.get("相手5", "")), key=f"candidate_opp5_{idx}")
+                    opp_col, amount_col = st.columns([3.6, .8])
+                    with opp_col:
+                        opponent_candidates = st.multiselect(
+                            "相手候補",
+                            horse_multi_options,
+                            default=saved_opponents,
+                            key=f"candidate_opponents_{idx}",
+                            help="軸流し・ボックスなどの相手をまとめて選べます。必要なら10頭以上でも選択できます。",
+                        )
                     with amount_col:
                         amount = st.number_input("1点金額", min_value=0, step=100, value=to_int(saved_row.get("1点金額", 0)), key=f"candidate_amount_{idx}")
                     formation1 = formation2 = formation3 = []
@@ -681,11 +689,7 @@ if section == "出馬表取込・選択入力":
                     "買い方": method,
                     "軸1": axis1,
                     "軸2": axis2,
-                    "相手1": opponent1,
-                    "相手2": opponent2,
-                    "相手3": opponent3,
-                    "相手4": opponent4,
-                    "相手5": opponent5,
+                    "相手候補": opponent_candidates if method != "フォーメーション" else [],
                     "1列目": formation1,
                     "2列目": formation2,
                     "3列目": formation3,

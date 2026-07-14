@@ -492,7 +492,9 @@ def manual_bets_from_rows(rows: list[dict], race_state: dict, odds_map: dict[str
             continue
         axis1 = horse_no_from_option(row.get("軸1", ""))
         axis2 = horse_no_from_option(row.get("軸2", ""))
-        opponents = [horse_no_from_option(row.get(key, "")) for key in ("相手1", "相手2", "相手3", "相手4", "相手5")]
+        opponent_values = _manual_row_list(row, "相手候補") or _manual_row_list(row, "相手")
+        opponent_values += [row.get(key, "") for key in [f"相手{i}" for i in range(1, 11)]]
+        opponents = [horse_no_from_option(value) for value in opponent_values]
         if method == "フォーメーション":
             combos = expand_manual_formation_combos(
                 ticket,
@@ -535,6 +537,7 @@ def bet_to_manual_row(bet: dict, horses: list[dict]) -> dict:
         "買い方": "通常",
         "軸1": values[0] if len(values) > 0 else "",
         "軸2": values[1] if len(values) > 2 else "",
+        "相手候補": values[1:] if len(values) > 1 else [],
         "相手1": values[1] if len(values) == 2 else values[2] if len(values) > 2 else "",
         "相手2": "",
         "相手3": "",
@@ -1210,7 +1213,13 @@ def step5():
                     axis1 = st.selectbox("軸1", horse_options, index=option_index(horse_options, saved.get("軸1", "")), key=f"manual_axis1_{idx}")
                 with t4:
                     axis2 = st.selectbox("軸2", horse_options, index=option_index(horse_options, saved.get("軸2", "")), key=f"manual_axis2_{idx}")
-                opponent1 = opponent2 = opponent3 = opponent4 = opponent5 = ""
+                saved_opponents = saved.get("相手候補", saved.get("相手", []))
+                if not isinstance(saved_opponents, list):
+                    saved_opponents = []
+                saved_opponents = list(dict.fromkeys(
+                    [v for v in saved_opponents if v in horse_multi_options]
+                    + [saved.get(f"相手{i}", "") for i in range(1, 11) if saved.get(f"相手{i}", "") in horse_multi_options]
+                ))
                 formation1 = saved.get("1列目", []) if isinstance(saved.get("1列目", []), list) else []
                 formation2 = saved.get("2列目", []) if isinstance(saved.get("2列目", []), list) else []
                 formation3 = saved.get("3列目", []) if isinstance(saved.get("3列目", []), list) else []
@@ -1226,24 +1235,22 @@ def step5():
                     with amount_col:
                         amount = st.number_input("1点金額", min_value=0, step=100, value=_to_int(saved.get("1点金額", 0)), key=f"manual_amount_{idx}")
                 else:
-                    o1, o2, o3, o4, o5, amount_col = st.columns([1, 1, 1, 1, 1, 1])
-                    with o1:
-                        opponent1 = st.selectbox("相手1", horse_options, index=option_index(horse_options, saved.get("相手1", "")), key=f"manual_opp1_{idx}")
-                    with o2:
-                        opponent2 = st.selectbox("相手2", horse_options, index=option_index(horse_options, saved.get("相手2", "")), key=f"manual_opp2_{idx}")
-                    with o3:
-                        opponent3 = st.selectbox("相手3", horse_options, index=option_index(horse_options, saved.get("相手3", "")), key=f"manual_opp3_{idx}")
-                    with o4:
-                        opponent4 = st.selectbox("相手4", horse_options, index=option_index(horse_options, saved.get("相手4", "")), key=f"manual_opp4_{idx}")
-                    with o5:
-                        opponent5 = st.selectbox("相手5", horse_options, index=option_index(horse_options, saved.get("相手5", "")), key=f"manual_opp5_{idx}")
+                    opp_col, amount_col = st.columns([3.6, .8])
+                    with opp_col:
+                        opponent_candidates = st.multiselect(
+                            "相手候補",
+                            horse_multi_options,
+                            default=saved_opponents,
+                            key=f"manual_opponents_{idx}",
+                            help="軸流し・ボックスなどの相手をまとめて選べます。必要なら10頭以上でも選択できます。",
+                        )
                     with amount_col:
                         amount = st.number_input("1点金額", min_value=0, step=100, value=_to_int(saved.get("1点金額", 0)), key=f"manual_amount_{idx}")
                 if method != "フォーメーション":
                     formation1 = formation2 = formation3 = []
                 manual_rows.append({
                     "券種": ticket, "買い方": method, "軸1": axis1, "軸2": axis2,
-                    "相手1": opponent1, "相手2": opponent2, "相手3": opponent3, "相手4": opponent4, "相手5": opponent5,
+                    "相手候補": opponent_candidates if method != "フォーメーション" else [],
                     "1列目": formation1, "2列目": formation2, "3列目": formation3,
                     "1点金額": amount,
                 })
