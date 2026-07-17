@@ -337,6 +337,28 @@ def progress_step(progress, percent: int, message: str):
     progress.progress(max(0, min(100, percent)), text=f"{message}（{percent}%）")
 
 
+def openai_error_message(exc: Exception) -> str:
+    """Return a user-actionable Japanese explanation for OpenAI API failures."""
+    text = str(exc)
+    lowered = text.lower()
+    if "invalid_api_key" in lowered or "incorrect api key" in lowered or "401" in lowered:
+        return "OpenAI APIキーが無効、またはコピーしたキーが間違っているため"
+    if "insufficient_quota" in lowered or "quota" in lowered or "429" in lowered:
+        return "OpenAI APIの利用枠・請求設定・上限に問題があるため"
+    if "model_not_found" in lowered or "model not found" in lowered or "does not exist" in lowered or "404" in lowered:
+        return "指定したOpenAIモデル名が使えないため"
+    if "permission" in lowered or "access" in lowered or "not have access" in lowered:
+        return "このAPIキーでは指定モデルを利用する権限がないため"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "OpenAI APIへの接続がタイムアウトしたため"
+    return "OpenAI APIと通信できなかったため"
+
+
+def compact_error_detail(exc: Exception, limit: int = 260) -> str:
+    text = " ".join(str(exc).split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 def _lap_format(value) -> str:
     return f"{value}秒" if value not in ("", None) else "－"
 
@@ -734,7 +756,7 @@ with st.sidebar:
             ollama_model = ""
             st.caption("ローカルAIは未導入です。キー不要モードはルール評価で動作します。")
         api_key = st.text_input("OpenAI APIキー", type="password", key="api_key_input", help="未入力ならルールベース仮評価")
-        model = st.text_input("モデル", value="gpt-5.4-mini")
+        model = st.text_input("モデル", value="gpt-5-mini", help="うまく動かない場合は gpt-5-mini / gpt-5.1 / gpt-4.1-mini など、利用権限のあるモデル名に変更してください。")
         if api_key:
             st.success("APIキーを利用できます", icon=":material/check_circle:")
             if IS_MAC:
@@ -1027,8 +1049,8 @@ def step2():
                         progress_step(progress, 58, "ローカル仮評価へ切り替えています")
                         scores, comments, risks = heuristic_evaluations(race["horses"], active_prediction_profile, trend)
                         source = "ローカル仮評価（OpenAIから自動切替）"
-                        error_text = str(exc).lower()
-                        fallback_reason = "OpenAI APIの利用枠が不足しているため" if "insufficient_quota" in error_text or "429" in error_text else "OpenAI APIと通信できなかったため"
+                        fallback_reason = openai_error_message(exc)
+                        race["openai_last_error"] = compact_error_detail(exc)
                 else:
                     progress_step(progress, 45, "ローカル仮評価を計算しています")
                     scores, comments, risks = heuristic_evaluations(race["horses"], active_prediction_profile, trend)
@@ -1037,10 +1059,15 @@ def step2():
             race["ai_scores"], race["ai_comments"], race["risk_comments"] = scores, comments, risks
             race["final_scores"] = deepcopy(scores)
             race["evaluation_source"] = source
+            if not fallback_reason:
+                race.pop("openai_last_error", None)
             persist("仮評価を保存しました")
             progress_step(progress, 100, "仮評価完了")
             if fallback_reason:
                 st.warning(f"{fallback_reason}、ローカル仮評価で続行しました。入力データと評価は保存済みです。")
+                if race.get("openai_last_error"):
+                    with st.expander("OpenAIエラー詳細"):
+                        st.code(str(race["openai_last_error"]), language=None)
             else:
                 st.success(f"{source}で仮評価を生成しました。")
     with c2: st.markdown('<div class="guide">評価はあくまで下書きです。材料不足は3点になり、元のAI評価は修正後も履歴として残ります。</div>', unsafe_allow_html=True)

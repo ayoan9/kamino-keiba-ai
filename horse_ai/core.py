@@ -450,7 +450,7 @@ def _evaluation_prompt(horses: list[dict], race_info: dict, prediction_policy: s
     )
 
 
-def evaluate_with_openai(horses: list[dict], race_info: dict, api_key: str, model: str = "gpt-5.4-mini", prediction_policy: str = "", trend_analysis: dict | None = None) -> tuple[dict, dict, dict]:
+def evaluate_with_openai(horses: list[dict], race_info: dict, api_key: str, model: str = "gpt-5-mini", prediction_policy: str = "", trend_analysis: dict | None = None) -> tuple[dict, dict, dict]:
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
     schema = _evaluation_schema()
@@ -1041,7 +1041,7 @@ def learn_from_result_history(states: list[dict], path: str = "data/prediction_p
     return profile, {"新規反映": processed, "重複": duplicates, "結果不足": skipped, "エラー": errors, "累計": after, "開始時": before}
 
 
-def extract_media_with_openai(files: list[tuple[str, str, bytes]], api_key: str, model: str = "gpt-5.4-mini", high_accuracy: bool = True, crop_profile: dict | None = None) -> tuple[dict, list[dict], str, list[str]]:
+def extract_media_with_openai(files: list[tuple[str, str, bytes]], api_key: str, model: str = "gpt-5-mini", high_accuracy: bool = True, crop_profile: dict | None = None) -> tuple[dict, list[dict], str, list[str]]:
     """Extract race data with visual preprocessing, OCR, structuring, and validation."""
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
@@ -3223,7 +3223,7 @@ def fetch_netkeiba_popular_odds(url: str, timeout: float = 12.0) -> tuple[dict[s
     return result, "\n".join(transcript_parts)[:50000]
 
 
-def parse_popular_odds_image_with_openai(data: bytes, mime: str, api_key: str, model: str = "gpt-5.4-mini") -> tuple[dict[str, float], str]:
+def parse_popular_odds_image_with_openai(data: bytes, mime: str, api_key: str, model: str = "gpt-5-mini") -> tuple[dict[str, float], str]:
     """Read a popular-odds screenshot and return normalized odds keys."""
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
