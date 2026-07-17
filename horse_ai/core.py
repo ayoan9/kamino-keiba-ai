@@ -4,10 +4,7 @@ import json
 import math
 import os
 import re
-import base64
-import getpass
 import html as html_lib
-import subprocess
 import unicodedata
 from copy import deepcopy
 from datetime import datetime
@@ -45,9 +42,6 @@ DEFAULT_LAYOUT_PROFILE = {
     "race_header": [0.0, 0.0, 1.0, 0.25],
     "horse_table": [0.0, 0.20, 1.0, 1.0],
 }
-KEYCHAIN_SERVICE = "jp.kamino.keiba-ai.openai"
-
-
 def storage_root() -> Path:
     """Return the writable data root, preferring persistent deployment storage.
 
@@ -448,19 +442,6 @@ def _evaluation_prompt(horses: list[dict], race_info: dict, prediction_policy: s
         f"過去走ラップ・傾向分析:\n{json.dumps(trend_analysis or {}, ensure_ascii=False)}\n\n"
         + json.dumps({"race": race_info, "horses": horses}, ensure_ascii=False)
     )
-
-
-def evaluate_with_openai(horses: list[dict], race_info: dict, api_key: str, model: str = "gpt-5-mini", prediction_policy: str = "", trend_analysis: dict | None = None) -> tuple[dict, dict, dict]:
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
-    schema = _evaluation_schema()
-    prompt = _evaluation_prompt(horses, race_info, prediction_policy, trend_analysis)
-    response = client.responses.create(model=model, input=prompt, text={"format": {"type": "json_schema", "name": "horse_evaluations", "strict": True, "schema": schema}})
-    data = json.loads(response.output_text)
-    scores, comments, risks = {}, {}, {}
-    for item in data["horses"]:
-        no = str(item["horse_number"]); scores[no] = item["scores"]; comments[no] = item["ai_comment"]; risks[no] = item["risk_comment"]
-    return scores, comments, risks
 
 
 def available_ollama_models(base_url: str = "http://127.0.0.1:11434") -> list[str]:
@@ -1041,74 +1022,6 @@ def learn_from_result_history(states: list[dict], path: str = "data/prediction_p
     return profile, {"新規反映": processed, "重複": duplicates, "結果不足": skipped, "エラー": errors, "累計": after, "開始時": before}
 
 
-def extract_media_with_openai(files: list[tuple[str, str, bytes]], api_key: str, model: str = "gpt-5-mini", high_accuracy: bool = True, crop_profile: dict | None = None) -> tuple[dict, list[dict], str, list[str]]:
-    """Extract race data with visual preprocessing, OCR, structuring, and validation."""
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
-    visuals, local_text, prep_notes = _prepare_visual_inputs(files, crop_profile)
-    ocr_content: list[dict[str, Any]] = [{
-        "type": "input_text",
-        "text": (
-            "これは中央競馬のレース資料です。OCR担当として、見える文字を正確に転記してください。"
-            "特にレース名、開催場、R番号、条件、発走時刻と、出馬表の各行を馬番ごとに保持してください。"
-            "表は『馬番 | 枠番 | 馬名 | 性齢 | 斤量 | 騎手 | 厩舎 | 人気 | 単勝オッズ』のように行単位で記述し、"
-            "過去走やコメントも馬名との対応を崩さないでください。読めない箇所は[不鮮明]とし、推測しないでください。"
-        ),
-    }]
-    if local_text:
-        ocr_content.append({"type": "input_text", "text": "PDF内の抽出可能テキスト（視覚情報と照合してください）:\n" + local_text[:60000]})
-    # Keep original PDFs as context, then add high-resolution page/screenshot tiles.
-    for name, mime, data in files[:3]:
-        if mime == "application/pdf" or name.lower().endswith(".pdf"):
-            encoded = base64.b64encode(data).decode("ascii")
-            ocr_content.append({"type": "input_file", "filename": name, "file_data": f"data:application/pdf;base64,{encoded}"})
-    for name, mime, data in visuals[:14]:
-        encoded = base64.b64encode(data).decode("ascii")
-        ocr_content.append({"type": "input_image", "image_url": f"data:{mime};base64,{encoded}", "detail": "high"})
-    if high_accuracy:
-        ocr_response = client.responses.create(
-            model=model,
-            input=[{"role": "user", "content": ocr_content}],
-            max_output_tokens=24000,
-        )
-        transcript = ocr_response.output_text
-        structure_content = [{
-            "type": "input_text",
-            "text": (
-                "次のOCR結果を中央競馬のレースデータとして構造化してください。推測は禁止です。"
-                "同じ馬の情報が複数箇所にある場合だけ統合し、馬番・馬名の対応を最優先してください。"
-                "距離は数字、頭数も数字、芝/ダートは『芝』か『ダート』で記述してください。\n\nOCR結果:\n"
-                + transcript[:90000]
-            ),
-        }]
-    else:
-        transcript = local_text
-        structure_content = ocr_content
-    race_fields = ["日付", "競馬場", "レース番号", "レース名", "芝/ダート", "距離", "馬場", "天候", "頭数", "発走時刻"]
-    horse_fields = HORSE_COLUMNS
-    schema = {
-        "type": "object",
-        "properties": {
-            "race_info": {"type": "object", "properties": {k: {"type": "string"} for k in race_fields}, "required": race_fields, "additionalProperties": False},
-            "horses": {"type": "array", "items": {"type": "object", "properties": {k: {"type": "string"} for k in horse_fields}, "required": horse_fields, "additionalProperties": False}},
-            "extracted_text": {"type": "string"},
-        },
-        "required": ["race_info", "horses", "extracted_text"],
-        "additionalProperties": False,
-    }
-    response = client.responses.create(
-        model=model,
-        input=[{"role": "user", "content": structure_content}],
-        text={"format": {"type": "json_schema", "name": "race_document_extraction", "strict": True, "schema": schema}},
-        max_output_tokens=20000,
-    )
-    data = json.loads(response.output_text)
-    horses = [_normalize_horse(h) for h in data["horses"]]
-    extracted_text = transcript or data["extracted_text"]
-    warnings = prep_notes + _validate_extraction(data["race_info"], horses)
-    return data["race_info"], horses, extracted_text, warnings
-
-
 def _prepare_visual_inputs(files: list[tuple[str, str, bytes]], crop_profile: dict | None = None) -> tuple[list[tuple[str, str, bytes]], str, list[str]]:
     """Render PDFs and enhance/split images so small racing-table text remains legible."""
     from PIL import Image, ImageEnhance, ImageFilter, ImageOps
@@ -1232,52 +1145,6 @@ def render_layout_preview(name: str, mime: str, data: bytes, profile: dict) -> b
         ratio = 1200/image.width
         image = image.resize((1200, int(image.height*ratio)), Image.Resampling.LANCZOS)
     out = BytesIO(); image.save(out, "PNG"); return out.getvalue()
-
-
-def get_keychain_api_key() -> str:
-    try:
-        result = subprocess.run(["security", "find-generic-password", "-a", getpass.getuser(), "-s", KEYCHAIN_SERVICE, "-w"], capture_output=True, text=True, timeout=5)
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError):
-        return ""
-
-
-def save_keychain_api_key(api_key: str) -> bool:
-    if not api_key.strip(): return False
-    try:
-        result = subprocess.run(["security", "add-generic-password", "-U", "-a", getpass.getuser(), "-s", KEYCHAIN_SERVICE, "-w", api_key.strip()], capture_output=True, text=True, timeout=10)
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def delete_keychain_api_key() -> bool:
-    try:
-        result = subprocess.run(["security", "delete-generic-password", "-a", getpass.getuser(), "-s", KEYCHAIN_SERVICE], capture_output=True, text=True, timeout=5)
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def save_local_api_key(api_key: str, path: str = ".streamlit/secrets.toml") -> bool:
-    if not api_key.strip(): return False
-    try:
-        target = Path(path); target.parent.mkdir(parents=True, exist_ok=True)
-        # JSON string escaping is compatible with TOML basic strings here.
-        target.write_text(f"OPENAI_API_KEY = {json.dumps(api_key.strip())}\n", encoding="utf-8")
-        os.chmod(target, 0o600)
-        return True
-    except OSError:
-        return False
-
-
-def delete_local_api_key(path: str = ".streamlit/secrets.toml") -> bool:
-    try:
-        target = Path(path)
-        if target.exists(): target.unlink()
-        return True
-    except OSError:
-        return False
 
 
 def _validate_extraction(info: dict, horses: list[dict]) -> list[str]:
@@ -3221,59 +3088,6 @@ def fetch_netkeiba_popular_odds(url: str, timeout: float = 12.0) -> tuple[dict[s
             detail += f" 最後のエラー: {last_error}"
         raise RuntimeError(f"netkeibaページから人気上位オッズ表を読み取れませんでした。ログイン状態・ページ形式・アクセス制限を確認してください。{detail}")
     return result, "\n".join(transcript_parts)[:50000]
-
-
-def parse_popular_odds_image_with_openai(data: bytes, mime: str, api_key: str, model: str = "gpt-5-mini") -> tuple[dict[str, float], str]:
-    """Read a popular-odds screenshot and return normalized odds keys."""
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
-    encoded = base64.b64encode(data).decode("ascii")
-    schema = {
-        "type": "object",
-        "properties": {
-            "rows": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "bet_type": {"type": "string", "enum": ["単勝", "複勝", "枠連", "馬連", "ワイド", "馬単", "3連複", "3連単"]},
-                        "numbers": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3},
-                        "odds": {"type": "number"},
-                        "source_text": {"type": "string"},
-                    },
-                    "required": ["bet_type", "numbers", "odds", "source_text"],
-                    "additionalProperties": False,
-                },
-            },
-            "transcript": {"type": "string"},
-        },
-        "required": ["rows", "transcript"],
-        "additionalProperties": False,
-    }
-    response = client.responses.create(
-        model=model,
-        input=[{"role": "user", "content": [
-            {"type": "input_text", "text": (
-                "これは競馬のオッズ人気上位表のスクリーンショットです。"
-                "見えている単勝・複勝・馬連・ワイド・馬単・3連複・3連単の組み合わせとオッズを抽出してください。"
-                "馬連/ワイドのように1行に複数券種がある場合は、それぞれ別行として出してください。"
-                "複勝が範囲表示の場合は上下限の平均値をoddsにしてください。"
-                "人気順位はnumbersに含めず、馬番または枠番だけを入れてください。読めない行は出力しないでください。"
-            )},
-            {"type": "input_image", "image_url": f"data:{mime};base64,{encoded}", "detail": "high"},
-        ]}],
-        text={"format": {"type": "json_schema", "name": "popular_odds_image", "strict": True, "schema": schema}},
-        max_output_tokens=8000,
-    )
-    payload = json.loads(response.output_text)
-    result: dict[str, float] = {}
-    for row in payload.get("rows", []):
-        bet_type = str(row.get("bet_type", ""))
-        numbers = [str(int(float(v))) for v in row.get("numbers", []) if re.fullmatch(r"\d+(?:\.\d+)?", str(v))]
-        if not bet_type or not numbers:
-            continue
-        result[_odds_lookup_key(bet_type, numbers)] = float(row["odds"])
-    return result, str(payload.get("transcript", ""))
 
 
 def compare_odds(previous: dict[str, float], current: dict[str, float], min_odds: float) -> tuple[list[dict], list[str]]:

@@ -20,14 +20,13 @@ import streamlit as st
 
 from horse_ai.core import (
     HORSE_COLUMNS, PRESETS, SCORE_KEYS, analyze_race_trends, archive_prediction, available_ollama_models, calculate_scores,
-    compare_odds, delete_local_api_key, evaluate_with_openai,
-    evaluate_with_ollama,
-    extract_media_with_openai, extract_screenshot_with_macos_vision,
-    extract_netkeiba_newspaper_pdf, extract_text_pdfs, generate_marks, align_marks_to_bets,
+    compare_odds, evaluate_with_ollama,
+    extract_screenshot_with_macos_vision, extract_netkeiba_race_table_image_with_tesseract,
+    extract_netkeiba_newspaper_pdf, generate_marks, align_marks_to_bets,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
-    cloud_storage_enabled, cloud_storage_status, data_path, load_cloud_json, load_json, load_layout_profiles, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
-    fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_image_with_openai, parse_popular_odds_snapshot, prediction_policy_prompt, render_layout_preview, save_json, save_local_api_key,
-    save_cloud_json, save_layout_profile, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
+    cloud_storage_enabled, cloud_storage_status, data_path, load_cloud_json, load_json, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
+    fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, save_json,
+    save_cloud_json, propose_bet_plans, parse_netkeiba_popular_odds_image_layout,
 )
 from horse_ai.exporter import image_bytes, render_summary
 from horse_ai.jra_fetcher import fetch_jra_odds, fetch_jra_result
@@ -226,11 +225,6 @@ def init():
     if "budget" not in st.session_state: st.session_state.budget = 5000
     if "unit" not in st.session_state: st.session_state.unit = 100
     if "min_odds" not in st.session_state: st.session_state.min_odds = 1.5
-    if "api_key_input" not in st.session_state:
-        secret_key = ""
-        try: secret_key = st.secrets.get("OPENAI_API_KEY", "")
-        except Exception: pass
-        st.session_state.api_key_input = os.getenv("OPENAI_API_KEY", "") or secret_key
     if "prediction_policy" not in st.session_state:
         st.session_state.prediction_policy = load_prediction_profile().get("policy", "")
 
@@ -335,28 +329,6 @@ def section_label(label: str):
 
 def progress_step(progress, percent: int, message: str):
     progress.progress(max(0, min(100, percent)), text=f"{message}（{percent}%）")
-
-
-def openai_error_message(exc: Exception) -> str:
-    """Return a user-actionable Japanese explanation for OpenAI API failures."""
-    text = str(exc)
-    lowered = text.lower()
-    if "invalid_api_key" in lowered or "incorrect api key" in lowered or "401" in lowered:
-        return "OpenAI APIキーが無効、またはコピーしたキーが間違っているため"
-    if "insufficient_quota" in lowered or "quota" in lowered or "429" in lowered:
-        return "OpenAI APIの利用枠・請求設定・上限に問題があるため"
-    if "model_not_found" in lowered or "model not found" in lowered or "does not exist" in lowered or "404" in lowered:
-        return "指定したOpenAIモデル名が使えないため"
-    if "permission" in lowered or "access" in lowered or "not have access" in lowered:
-        return "このAPIキーでは指定モデルを利用する権限がないため"
-    if "timeout" in lowered or "timed out" in lowered:
-        return "OpenAI APIへの接続がタイムアウトしたため"
-    return "OpenAI APIと通信できなかったため"
-
-
-def compact_error_detail(exc: Exception, limit: int = 260) -> str:
-    text = " ".join(str(exc).split())
-    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def _lap_format(value) -> str:
@@ -748,30 +720,14 @@ with st.sidebar:
             st.caption("保存された予想はまだありません。手順6で選択して保存できます。")
         st.caption("共有版では表示を軽くするため、一覧は最新50件までです。")
     ollama_models = available_ollama_models()
-    with st.expander("AI・詳細設定", expanded=False):
+    ollama_model = ""
+    with st.expander("ローカルAI・詳細設定", expanded=False):
         if ollama_models:
             ollama_model = st.selectbox("ローカルAIモデル", ollama_models)
             st.success("キー不要のローカルAIを利用できます。", icon=":material/computer:")
         else:
-            ollama_model = ""
             st.caption("ローカルAIは未導入です。キー不要モードはルール評価で動作します。")
-        api_key = st.text_input("OpenAI APIキー", type="password", key="api_key_input", help="未入力ならルールベース仮評価")
-        model = st.text_input("モデル", value="gpt-5-mini", help="うまく動かない場合は gpt-5-mini / gpt-5.1 / gpt-4.1-mini など、利用権限のあるモデル名に変更してください。")
-        if api_key:
-            st.success("APIキーを利用できます", icon=":material/check_circle:")
-            if IS_MAC:
-                key_col1, key_col2 = st.columns(2)
-                if key_col1.button("このMacに保存", width="stretch", help="Git除外・権限600のローカル設定へ保存します"):
-                    if save_local_api_key(api_key): st.success("ローカル設定へ保存しました。次回から自動で読み込みます。")
-                    else: st.error("APIキーを保存できませんでした。")
-                if key_col2.button("保存を削除", width="stretch"):
-                    if delete_local_api_key():
-                        del st.session_state["api_key_input"]; st.rerun()
-                    else: st.warning("保存されたキーを削除できませんでした。")
-            else:
-                st.caption("共有版ではAPIキーを端末へ保存しません。管理者が公開環境の秘密設定へ登録してください。")
-        else:
-            st.caption("Macローカル版では、一度入力して保存すると次回から入力不要です。キーはレースデータや予想履歴には保存されません。")
+        st.caption("外部APIは使わず、ローカルAIまたはルール仮評価だけで動作します。")
     st.markdown("<br>", unsafe_allow_html=True)
     st.caption("※ 予想整理の支援ツールです。利益を保証するものではありません。")
 
@@ -819,64 +775,24 @@ def step1():
             "PDFまたは画像を選択",
             type=["pdf", "png", "jpg", "jpeg", "webp"],
             accept_multiple_files=True,
-            help="添付例と同じnetkeiba出馬表画面はMacローカルOCRで無料解析できます。OpenAI API解析も選択できます。",
+            help="netkeiba競馬新聞PDFを推奨します。画像はMacローカルOCRまたは公開環境の無料OCRで解析します。",
         )
         if uploaded_race_files:
             has_newspaper_pdf = any((f.type == "application/pdf" or f.name.lower().endswith(".pdf")) for f in uploaded_race_files)
-            analysis_options = (["netkeiba競馬新聞PDF（推奨）"] if has_newspaper_pdf else []) + (["MacローカルOCR（無料・推奨）"] if IS_MAC else []) + ["OpenAI API"]
+            analysis_options = (["netkeiba競馬新聞PDF（推奨）"] if has_newspaper_pdf else []) + (["MacローカルOCR（無料・推奨）"] if IS_MAC else ["Tesseract無料OCR"])
             analysis_method = st.radio(
                 "解析方式",
                 analysis_options,
                 horizontal=True,
-                help="netkeiba競馬新聞PDFは文字座標から直接解析します。API利用枠やOCRは不要です。",
+                help="netkeiba競馬新聞PDFは文字座標から直接解析します。外部APIは不要です。",
             )
-            high_accuracy = True
-            use_fixed_range = False
-            if analysis_method == "OpenAI API":
-                high_accuracy = st.toggle(
-                    "高精度解析",
-                    value=True,
-                    help="画像の文字起こしとデータ構造化を2段階で行います。API利用量と処理時間が増えます。",
-                )
-                use_fixed_range = st.toggle(
-                    "保存した固定範囲を使う",
-                    value=True,
-                    help="同じレイアウトのキャプチャやPDFから、レース情報と出馬表の範囲だけを解析します。",
-                )
-            elif analysis_method.startswith("Macローカル"):
-                st.success("添付例の出馬表レイアウトを自動認識します。赤枠・緑枠の設定やOpenAI APIキーは不要です。", icon=":material/computer:")
+            if analysis_method.startswith("Macローカル"):
+                st.success("添付例の出馬表レイアウトを自動認識します。赤枠・緑枠の設定や外部APIキーは不要です。", icon=":material/computer:")
+            elif analysis_method.startswith("Tesseract"):
+                st.success("公開環境の無料OCRで解析します。PDFがある場合はPDF取込の方が安定します。", icon=":material/text_fields:")
             else:
                 st.success("このPDF仕様専用の座標パーサーを使用します。レース情報・全馬・血統・過去5走・脚質をAPIなしで抽出します。", icon=":material/picture_as_pdf:")
             active_profile = None
-            if use_fixed_range:
-                profiles = load_layout_profiles()
-                selected_profile_name = st.selectbox("解析範囲テンプレート", list(profiles), key="layout_profile_select")
-                selected_profile = profiles[selected_profile_name]
-                with st.expander("解析範囲を調整・保存", expanded=False):
-                    st.caption("赤がレース情報、緑が出馬表です。毎回同じ画面サイズ・表示位置でキャプチャしてください。")
-                    ph1, ph2 = st.columns(2)
-                    with ph1:
-                        header_x = st.slider("レース情報・横範囲（%）", 0, 100, tuple(round(v*100) for v in [selected_profile["race_header"][0], selected_profile["race_header"][2]]), key=f"hx_{selected_profile_name}")
-                        header_y = st.slider("レース情報・縦範囲（%）", 0, 100, tuple(round(v*100) for v in [selected_profile["race_header"][1], selected_profile["race_header"][3]]), key=f"hy_{selected_profile_name}")
-                    with ph2:
-                        table_x = st.slider("出馬表・横範囲（%）", 0, 100, tuple(round(v*100) for v in [selected_profile["horse_table"][0], selected_profile["horse_table"][2]]), key=f"tx_{selected_profile_name}")
-                        table_y = st.slider("出馬表・縦範囲（%）", 0, 100, tuple(round(v*100) for v in [selected_profile["horse_table"][1], selected_profile["horse_table"][3]]), key=f"ty_{selected_profile_name}")
-                    profile_name = st.text_input("テンプレート名", value=selected_profile_name, key=f"pn_{selected_profile_name}")
-                    active_profile = {
-                        "name": profile_name,
-                        "race_header": [header_x[0]/100, header_y[0]/100, header_x[1]/100, header_y[1]/100],
-                        "horse_table": [table_x[0]/100, table_y[0]/100, table_x[1]/100, table_y[1]/100],
-                    }
-                    try:
-                        preview = render_layout_preview(uploaded_race_files[0].name, uploaded_race_files[0].type or "application/octet-stream", uploaded_race_files[0].getvalue(), active_profile)
-                        st.image(preview, caption="解析範囲プレビュー", width="stretch")
-                    except Exception as exc:
-                        st.warning(f"範囲プレビューを表示できませんでした: {exc}")
-                    if st.button("この範囲を保存", icon=":material/save:"):
-                        save_layout_profile(profile_name, active_profile["race_header"], active_profile["horse_table"])
-                        st.success("解析範囲を保存しました。次回も選択できます。")
-                if active_profile is None:
-                    active_profile = selected_profile
             st.caption(" / ".join(f.name for f in uploaded_race_files[:6]))
             preview_images = [f for f in uploaded_race_files if (f.type or "").startswith("image/")]
             if preview_images:
@@ -896,24 +812,12 @@ def step1():
                             progress_step(progress, 28, "画像OCRを実行しています")
                             first_name, first_mime, first_data = media_files[0]
                             extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_screenshot_with_macos_vision(first_data, first_name, first_mime)
-                        elif api_key:
-                            try:
-                                progress_step(progress, 28, "AI画像解析を実行しています")
-                                extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_media_with_openai(media_files, api_key, model, high_accuracy, active_profile)
-                            except Exception as api_exc:
-                                if IS_MAC and ("429" in str(api_exc) or "insufficient_quota" in str(api_exc)):
-                                    progress_step(progress, 50, "ローカルOCRへ切り替えています")
-                                    first_name, first_mime, first_data = media_files[0]
-                                    extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_screenshot_with_macos_vision(first_data, first_name, first_mime)
-                                    extraction_warnings.insert(0, "OpenAI APIの利用枠がないため、MacローカルOCRへ自動切替しました")
-                                else:
-                                    raise
-                        elif IS_MAC:
-                            progress_step(progress, 28, "MacローカルOCRを実行しています")
+                        elif analysis_method.startswith("Tesseract"):
+                            progress_step(progress, 28, "無料OCRを実行しています")
                             first_name, first_mime, first_data = media_files[0]
-                            extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_screenshot_with_macos_vision(first_data, first_name, first_mime)
+                            extracted_info, extracted_horses, extracted_text, extraction_warnings = extract_netkeiba_race_table_image_with_tesseract(first_data, first_name)
                         else:
-                            raise ValueError("共有版で画像を解析するには、管理者によるOpenAI APIキー設定が必要です。netkeiba競馬新聞PDFはキーなしで解析できます。")
+                            raise ValueError("画像を解析できませんでした。netkeiba競馬新聞PDFを使うか、出馬表テキストを貼り付けてください。")
                     progress_step(progress, 78, "読み取り結果を画面へ反映しています")
                     race["race_info"].update({k: v for k, v in extracted_info.items() if v not in ("", None)})
                     if extracted_horses: race["horses"] = extracted_horses
@@ -1020,17 +924,13 @@ def step2():
     active_prediction_profile = load_prediction_profile()
     policy_for_ai = prediction_policy_prompt(active_prediction_profile)
     with c1:
-        evaluation_mode = st.selectbox(
-            "仮評価方法",
-            ["キー不要（ローカル）", "OpenAI API（任意）"],
-            help="初期値はAPIキーを使いません。Ollama導入済みならローカルAI、未導入ならルール仮評価で続行します。",
-        )
+        st.caption("仮評価は外部APIを使わず、ローカルAIまたはルール評価で生成します。")
         if st.button("仮評価を生成", type="primary", width="stretch", icon=":material/auto_awesome:"):
             fallback_reason = ""
             progress = st.progress(0, text="仮評価を準備しています（0%）")
             progress_step(progress, 18, "出走馬データを整理しています")
             with st.spinner("各馬を仮評価しています…"):
-                if evaluation_mode.startswith("キー不要") and ollama_models:
+                if ollama_models:
                     try:
                         progress_step(progress, 38, "ローカルAIで評価しています")
                         scores, comments, risks = evaluate_with_ollama(race["horses"], race["race_info"], ollama_model, policy_for_ai, trend_analysis=trend)
@@ -1040,17 +940,6 @@ def step2():
                         scores, comments, risks = heuristic_evaluations(race["horses"], active_prediction_profile, trend)
                         source = "ローカル仮評価（AI自動切替）"
                         fallback_reason = "ローカルAIを実行できなかったため"
-                elif evaluation_mode.startswith("OpenAI") and api_key:
-                    try:
-                        progress_step(progress, 38, "OpenAIで評価しています")
-                        scores, comments, risks = evaluate_with_openai(race["horses"], race["race_info"], api_key, model, policy_for_ai, trend)
-                        source = "OpenAI API"
-                    except Exception as exc:
-                        progress_step(progress, 58, "ローカル仮評価へ切り替えています")
-                        scores, comments, risks = heuristic_evaluations(race["horses"], active_prediction_profile, trend)
-                        source = "ローカル仮評価（OpenAIから自動切替）"
-                        fallback_reason = openai_error_message(exc)
-                        race["openai_last_error"] = compact_error_detail(exc)
                 else:
                     progress_step(progress, 45, "ローカル仮評価を計算しています")
                     scores, comments, risks = heuristic_evaluations(race["horses"], active_prediction_profile, trend)
@@ -1059,15 +948,10 @@ def step2():
             race["ai_scores"], race["ai_comments"], race["risk_comments"] = scores, comments, risks
             race["final_scores"] = deepcopy(scores)
             race["evaluation_source"] = source
-            if not fallback_reason:
-                race.pop("openai_last_error", None)
             persist("仮評価を保存しました")
             progress_step(progress, 100, "仮評価完了")
             if fallback_reason:
                 st.warning(f"{fallback_reason}、ローカル仮評価で続行しました。入力データと評価は保存済みです。")
-                if race.get("openai_last_error"):
-                    with st.expander("OpenAIエラー詳細"):
-                        st.code(str(race["openai_last_error"]), language=None)
             else:
                 st.success(f"{source}で仮評価を生成しました。")
     with c2: st.markdown('<div class="guide">評価はあくまで下書きです。材料不足は3点になり、元のAI評価は修正後も履歴として残ります。</div>', unsafe_allow_html=True)
@@ -1415,7 +1299,7 @@ def step4():
         )
         ocr_mode = st.radio(
             "画像読み取り方法",
-            ["固定レイアウトOCR", "無料OCRを優先", "OpenAI画像解析"],
+            ["固定レイアウトOCR", "無料OCRを優先"],
             horizontal=True,
             help="固定レイアウトOCRはnetkeibaの人気上位表スクショ向きです。通常はこちらを使います。",
         )
@@ -1454,14 +1338,7 @@ def step4():
                                 parsed = parse_popular_odds_snapshot(transcript)
                                 method = "Mac標準OCR" if IS_MAC else "Tesseract無料OCR"
                             except Exception as local_exc:
-                                if not api_key:
-                                    raise local_exc
-                                errors.append(f"{name}: 無料OCR不可 → OpenAI画像解析へ切替（{local_exc}）")
-                        if not parsed and api_key:
-                            parsed, transcript = parse_popular_odds_image_with_openai(image_bytes_data, odds_image.type or "image/png", api_key, model)
-                            method = "OpenAI画像解析"
-                        elif local_mode == "OpenAI画像解析":
-                            raise ValueError("OpenAI画像解析を使うにはOPENAI_API_KEYが必要です。")
+                                raise local_exc
                         if parsed:
                             merged_parsed.update(parsed)
                             transcript_parts.append(f"【{name} / {method or '画像OCR'}】\n{transcript}")
@@ -1480,13 +1357,7 @@ def step4():
                     persist("オッズ表画像の読み取り結果を保存しました")
                     st.rerun()
                 except Exception as exc:
-                    exc_text = str(exc)
-                    if "invalid_api_key" in exc_text or "Incorrect API key" in exc_text or "401" in exc_text:
-                        st.error("OpenAI APIキーが無効です。Renderの環境変数 OPENAI_API_KEY を更新するか、URL取得・無料OCR・手入力で続行してください。")
-                    elif "insufficient_quota" in exc_text or "quota" in exc_text or "429" in exc_text:
-                        st.error("OpenAI APIの利用枠が不足しています。URL取得・無料OCR・手入力で続行するか、OpenAIの請求設定を確認してください。")
-                    else:
-                        st.error(f"画像からオッズを読み取れませんでした: {exc}")
+                    st.error(f"画像からオッズを読み取れませんでした: {exc}")
         if image_parsed:
             st.success(f"画像から{len(image_parsed)}件のオッズを読み取り済みです。方式: {race.get('popular_odds_image_method', '画像OCR')}", icon=":material/photo_camera:")
         popular_snapshot = st.text_area(

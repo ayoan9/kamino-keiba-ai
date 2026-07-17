@@ -1,4 +1,4 @@
-from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, delete_local_api_key, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_odds_calibration, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, parse_single_odds_text, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_local_api_key, save_prediction_profile, update_betting_journal_entry
+from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_odds_calibration, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, parse_single_odds_text, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_prediction_profile, update_betting_journal_entry
 from horse_ai.historical import _available_month_tokens, _day_races, _result_detail, aggregate_history
 from horse_ai.jra_fetcher import _anchor_actions, _race_identity, _single_odds, _tables
 
@@ -188,14 +188,6 @@ def test_fixed_layout_profile_crops_named_regions(tmp_path):
     assert any("race_header" in name for name in names)
     assert any("horse_table" in name for name in names)
     assert any("固定画面" in note for note in notes)
-
-
-def test_local_api_key_file_is_private_and_deletable(tmp_path):
-    path = tmp_path / "secrets.toml"
-    assert save_local_api_key('sk-test"quoted', str(path))
-    assert 'OPENAI_API_KEY' in path.read_text(encoding="utf-8")
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
-    assert delete_local_api_key(str(path)) and not path.exists()
 
 
 def test_running_style_inference_from_corner_positions():
@@ -451,7 +443,7 @@ def test_result_history_import_skips_incomplete_and_deduplicates(tmp_path):
     assert report["新規反映"] == 1 and report["重複"] == 1 and report["結果不足"] == 1
 
 
-def test_jra_html_odds_parsing_without_api_key():
+def test_jra_html_odds_parsing_without_external_api():
     document = """
     <a onclick="return doAction('/JRADB/accessO.html','race-token/AA');"><img alt="11レース"></a>
     <table><thead><tr><th>馬番</th><th>馬名</th><th>単勝</th><th>複勝（3着払い）</th></tr></thead>
