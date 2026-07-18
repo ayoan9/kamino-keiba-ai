@@ -471,7 +471,7 @@ def _manual_estimated_odds(ticket: str, combo: tuple[str, ...], score_rows: list
     return max(1.1, product ** powers.get(ticket, .5) * discounts.get(ticket, 1.0))
 
 
-def manual_bets_from_rows(rows: list[dict], race_state: dict, odds_map: dict[str, float], min_odds: float) -> tuple[list[dict], list[dict], int]:
+def manual_bets_from_rows(rows: list[dict], race_state: dict, odds_map: dict[str, float], min_odds: float, allow_torigami: bool = True) -> tuple[list[dict], list[dict], int]:
     output: list[dict] = []
     skipped: list[dict] = []
     total = 0
@@ -518,6 +518,16 @@ def manual_bets_from_rows(rows: list[dict], race_state: dict, odds_map: dict[str
             else:
                 output.append(item)
                 total += stake
+    if not allow_torigami and output:
+        portfolio_total = sum(int(item.get("推奨購入金額", 0)) for item in output)
+        kept = []
+        for item in output:
+            if int(item.get("想定払戻", 0)) < portfolio_total:
+                skipped.append({**item, "見送り理由": f"トリガミ回避: 的中時の想定払戻{int(item.get('想定払戻', 0)):,}円が購入総額{portfolio_total:,}円を下回る"})
+            else:
+                kept.append(item)
+        output = kept
+        total = sum(int(item.get("推奨購入金額", 0)) for item in output)
     return output, skipped, total
 
 
@@ -577,6 +587,7 @@ def run_jra_fetch_job(current_race: dict, job: dict) -> None:
                     float(st.session_state.min_odds),
                     snapshot["odds"],
                     load_prediction_profile(),
+                    allow_torigami=bool(current_race.get("allow_torigami", True)),
                 )
                 selected_name = current_race.get("selected_bet_plan")
                 if selected_name not in current_race["bet_plans"]:
@@ -1060,10 +1071,16 @@ def step5():
         with cols[0]: budget = st.number_input("購入予算", min_value=100, step=100, key="budget")
         with cols[1]: unit = st.number_input("最小購入単位", min_value=100, step=100, key="unit")
         with cols[2]: min_odds = st.number_input("最低買いオッズ", min_value=1.0, step=.1, key="min_odds")
+        allow_torigami = st.checkbox(
+            "トリガミを許容する",
+            value=bool(race.get("allow_torigami", True)),
+            help="オンにすると的中率寄りの保険買いを残します。オフにすると、的中しても購入総額を下回る可能性が高い買い目を削り、回収率優先で組み立てます。",
+        )
+        race["allow_torigami"] = allow_torigami
         st.caption("点数は入力しません。100円単位・予算上限・候補の質から自動決定します。")
     if st.button("全券種を分析して買い方を提案", type="primary", icon=":material/psychology:"):
         latest_odds = race["odds_history"][-1].get("odds", {}) if race.get("odds_history") else {}
-        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(budget), int(unit), float(min_odds), latest_odds, load_prediction_profile())
+        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(budget), int(unit), float(min_odds), latest_odds, load_prediction_profile(), allow_torigami=allow_torigami)
         recommended = next((name for name, plan in race["bet_plans"].items() if plan.get("recommended")), "バランス")
         race["selected_bet_plan"] = recommended
         selected = race["bet_plans"].get(recommended, {})
@@ -1089,6 +1106,7 @@ def step5():
                 st.caption(descriptions.get(name, ""))
                 a,b,c = st.columns(3)
                 a.metric("点数", summary["点数"]); b.metric("的中", summary["的中期待指数"]); c.metric("回収", summary["回収期待指数"])
+                st.caption(f'トリガミ: {summary.get("トリガミ", "許容" if race.get("allow_torigami", True) else "回避")}')
                 if summary.get("実績券種"):
                     st.caption(f'参考実績: {summary["実績券種"]}')
         default_plan = race.get("selected_bet_plan") if race.get("selected_bet_plan") in plan_names else plan_names[0]
@@ -1167,7 +1185,7 @@ def step5():
                     "1点金額": amount,
                 })
         latest_odds = race["odds_history"][-1].get("odds", {}) if race.get("odds_history") else {}
-        manual_bets, manual_skipped, manual_total = manual_bets_from_rows(manual_rows, race, latest_odds, float(min_odds))
+        manual_bets, manual_skipped, manual_total = manual_bets_from_rows(manual_rows, race, latest_odds, float(min_odds), allow_torigami=bool(race.get("allow_torigami", True)))
         race["manual_bet_rows"] = manual_rows
         c1, c2, c3 = st.columns(3)
         c1.metric("手動買い目数", len(manual_bets))
@@ -1432,7 +1450,7 @@ def step4():
                     old = race["final_scores"][no]["妙味"]
                     race["final_scores"][no]["妙味"] = max(1, min(5, old + (1 if ratio >= 1.25 else -1 if ratio <= .7 else 0)))
         race["score_results"] = calculate_scores(race["horses"], race["final_scores"], race["weights"])
-        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(st.session_state.budget), int(st.session_state.unit), float(st.session_state.min_odds), current, load_prediction_profile())
+        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(st.session_state.budget), int(st.session_state.unit), float(st.session_state.min_odds), current, load_prediction_profile(), allow_torigami=bool(race.get("allow_torigami", True)))
         selected_name = race.get("selected_bet_plan")
         if selected_name not in race["bet_plans"]:
             selected_name = next((name for name, plan in race["bet_plans"].items() if plan.get("recommended")), next(iter(race["bet_plans"]), ""))

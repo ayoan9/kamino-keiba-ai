@@ -215,6 +215,7 @@ def new_state() -> dict[str, Any]:
         "evaluation_source": "",
         "score_results": [], "marks": {}, "weights": {k: 1.0 for k in SCORE_KEYS},
         "bets": [], "bet_plans": {}, "selected_bet_plan": "AIおすすめ", "skipped_bets": [], "odds_history": [], "alerts": [],
+        "allow_torigami": True,
         "jra_fetch_schedule": [], "jra_auto_fetch_log": [],
         "result_feedback": {}, "trend_analysis": {}, "web_history": {},
         "summary": {"レース総評": "", "展開予想": "", "有利脚質": "", "波乱度": "中", "買い判断": "", "注意点": "オッズは変動します。払戻・利益は目安です。"},
@@ -2037,7 +2038,45 @@ def _portfolio_summary(bets: list[dict], skipped: list[dict]) -> dict:
     return {"点数": len(bets), "的中期待指数": round(avg_hit, 1), "回収期待指数": round(avg_value, 1)}
 
 
-def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None, style: str = "標準", odds_calibration: dict | None = None) -> tuple[list[dict], list[dict]]:
+def _remove_torigami_bets(bets: list[dict], skipped: list[dict], unit: int, allow_torigami: bool) -> tuple[list[dict], list[dict]]:
+    """Drop bets whose standalone payout cannot cover the portfolio spend.
+
+    Torigami is judged against the current adopted portfolio, not a guaranteed
+    outcome.  After dropping low-return insurance tickets, freed budget is
+    redistributed to the remaining main/upside tickets so the plan still uses
+    roughly the same budget when possible.
+    """
+    if allow_torigami or not bets:
+        return bets, skipped
+    kept = [dict(item) for item in bets]
+    rejected: list[dict] = []
+    for _ in range(6):
+        total_stake = sum(int(item.get("推奨購入金額", 0)) for item in kept)
+        if total_stake <= 0:
+            break
+        low_return = [item for item in kept if int(item.get("想定払戻", 0)) < total_stake]
+        if not low_return:
+            break
+        low_keys = {item.get("買い目") for item in low_return}
+        for item in low_return:
+            rejected.append({
+                **item,
+                "見送り理由": f"トリガミ回避: 的中時の想定払戻{int(item.get('想定払戻', 0)):,}円が購入総額{total_stake:,}円を下回る",
+            })
+        kept = [item for item in kept if item.get("買い目") not in low_keys]
+        if not kept:
+            break
+        freed = sum(int(item.get("推奨購入金額", 0)) for item in low_return)
+        preferred = [i for i, item in enumerate(kept) if item.get("買い目役割") in {"メイン", "上積み"}] or list(range(len(kept)))
+        for idx in range(freed // max(1, unit)):
+            target = preferred[idx % len(preferred)]
+            kept[target]["推奨購入金額"] = int(kept[target].get("推奨購入金額", 0)) + unit
+            kept[target]["想定払戻"] = int(kept[target]["推奨購入金額"] * float(kept[target].get("現在オッズ", 0)))
+            kept[target]["想定利益"] = int(kept[target]["想定払戻"] - kept[target]["推奨購入金額"])
+    return kept, skipped + rejected
+
+
+def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None, style: str = "標準", odds_calibration: dict | None = None, allow_torigami: bool = True) -> tuple[list[dict], list[dict]]:
     """Build a coherent one-anchor portfolio rather than scattered tickets.
 
     The baseline pattern is the user's practical style:
@@ -2076,6 +2115,13 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
         "高回収": {"max_points": 10, "wide_limit": 0, "quinella_limit": 3, "triple_limit": 6, "win_weight": .72, "min_wide_odds": 99.0, "target_hit": 24},
     }
     setting = style_settings.get(style, style_settings["標準"])
+    if not allow_torigami:
+        setting = {
+            **setting,
+            "wide_limit": 0 if style in {"回収重視", "高回収"} else min(1, int(setting["wide_limit"])),
+            "min_wide_odds": max(float(setting["min_wide_odds"]), 4.0),
+            "max_points": max(3, int(setting["max_points"]) - 2),
+        }
 
     def add(ticket: str, nums: list[str], weight: float, reason: str, role: str) -> None:
         key = _odds_lookup_key(ticket, nums)
@@ -2179,10 +2225,10 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
             continue
         payout = int(amount * item["現在オッズ"])
         output.append({**item, "推奨購入金額": amount, "想定払戻": payout, "想定利益": payout - amount})
-    return output, skipped
+    return _remove_torigami_bets(output, skipped, unit, allow_torigami)
 
 
-def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None, prediction_profile: dict | None = None) -> dict[str, dict]:
+def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min_odds: float, odds_map: dict[str, float] | None = None, prediction_profile: dict | None = None, allow_torigami: bool = True) -> dict[str, dict]:
     """Return coherent one-anchor portfolios, not scattered independent tickets."""
     if not rows or budget < unit:
         return {}
@@ -2196,12 +2242,12 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
     }
     plans = {}
     for name, (style, label) in anchor_styles.items():
-        bets, skipped = build_anchor_set_plan(rows, marks, budget, unit, min_odds, odds_map, style=style, odds_calibration=odds_calibration)
+        bets, skipped = build_anchor_set_plan(rows, marks, budget, unit, min_odds, odds_map, style=style, odds_calibration=odds_calibration, allow_torigami=allow_torigami)
         if not bets:
             continue
         plans[name] = {
             "bets": bets, "skipped": skipped,
-            "summary": {**_portfolio_summary(bets, skipped), "型": label},
+            "summary": {**_portfolio_summary(bets, skipped), "型": label, "トリガミ": "許容" if allow_torigami else "回避"},
         }
     if preferred_types:
         # Personal history still influences a viewpoint, but it is filtered
@@ -2209,11 +2255,12 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
         # bundle of unrelated tickets just because a historical ticket type did
         # well.
         bets, skipped = optimize_bets(rows, marks, budget, unit, preferred_types, "標準", min(max(1, budget // unit), 5), min_odds, odds_map, odds_calibration)
+        bets, skipped = _remove_torigami_bets(bets, skipped, unit, allow_torigami)
         if bets:
             plans["実績反映"] = {
                 "bets": bets,
                 "skipped": skipped,
-                "summary": {**_portfolio_summary(bets, skipped), "型": "実績券種を参考にした控えめ構成", "実績券種": "・".join(preferred_types)},
+                "summary": {**_portfolio_summary(bets, skipped), "型": "実績券種を参考にした控えめ構成", "実績券種": "・".join(preferred_types), "トリガミ": "許容" if allow_torigami else "回避"},
             }
     if plans:
         # The user's target is not maximum hit rate; prefer a compact anchor
