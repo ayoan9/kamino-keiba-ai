@@ -2754,6 +2754,13 @@ def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, flo
     width, height = image.size
     if height / max(1, width) > 2.1:
         return _parse_netkeiba_vertical_odds_image_layout(image, pytesseract)
+    matrix_note = ""
+    try:
+        matrix_result, matrix_note = _parse_netkeiba_matrix_odds_image_layout(image, pytesseract)
+        if len(matrix_result) >= 20:
+            return matrix_result, matrix_note
+    except Exception as exc:
+        matrix_note = f"全組み合わせ表OCRは未使用: {exc}"
 
     def crop_rel(box: tuple[float, float, float, float]) -> Image.Image:
         x1, y1, x2, y2 = box
@@ -2847,7 +2854,228 @@ def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, flo
     if not result:
         raise RuntimeError("固定レイアウトOCRでオッズ数字を読み取れませんでした。画像の表示範囲・倍率を確認してください。")
     notes.append(f"固定レイアウトOCRで{len(result)}件のオッズを読み取り")
+    if matrix_note:
+        notes.append(matrix_note)
     return result, "\n".join(notes)
+
+
+def _parse_netkeiba_matrix_odds_image_layout(image, pytesseract) -> tuple[dict[str, float], str]:
+    """Read netkeiba full-combination matrix odds screenshots.
+
+    Targets ticket-specific matrix pages such as 馬連・ワイド・馬単 where the
+    columns are headed by colored horse-number bars and each cell row contains
+    opponent number + odds.  Unlike the popular-list parser, this can ingest all
+    visible two-horse combinations without requiring the user to type them.
+    """
+    from PIL import Image, ImageEnhance, ImageOps
+
+    width, height = image.size
+
+    def is_header_pixel(pixel: tuple[int, int, int]) -> bool:
+        r, g, b = pixel
+        mx, mn = max(pixel), min(pixel)
+        avg = (r + g + b) / 3
+        # Colored frame bars + black/red/blue/yellow/green/orange/pink headers.
+        return (mx - mn > 38 and 45 < avg < 235) or avg < 60
+
+    # Find colored horizontal header bands below the navigation controls.
+    y_scores: list[tuple[int, float]] = []
+    sample_step = max(1, width // 420)
+    for y in range(int(height * 0.08), height):
+        colored = 0
+        total = 0
+        for x in range(0, width, sample_step):
+            total += 1
+            if is_header_pixel(image.getpixel((x, y))):
+                colored += 1
+        frac = colored / max(1, total)
+        if frac > 0.045:
+            y_scores.append((y, frac))
+
+    y_groups: list[list[int]] = []
+    for y, _ in y_scores:
+        if not y_groups or y - y_groups[-1][-1] > 4:
+            y_groups.append([y])
+        else:
+            y_groups[-1].append(y)
+
+    header_bands: list[tuple[int, int]] = []
+    for group in y_groups:
+        if not group:
+            continue
+        y1, y2 = min(group), max(group)
+        band_h = y2 - y1 + 1
+        # Ignore tall colored areas such as banners; odds headers are compact.
+        if 8 <= band_h <= max(42, height * 0.045):
+            header_bands.append((max(0, y1 - 2), min(height, y2 + 3)))
+
+    def ocr_digits(crop: Image.Image) -> str:
+        crop = ImageOps.autocontrast(crop.convert("L"), cutoff=2)
+        if crop.width < 80:
+            scale = max(2, min(5, int(120 / max(1, crop.width)) + 1))
+            crop = crop.resize((crop.width * scale, crop.height * scale), Image.Resampling.LANCZOS)
+        crop = ImageEnhance.Contrast(crop).enhance(1.7)
+        text = pytesseract.image_to_string(
+            crop,
+            lang="eng",
+            config='--psm 7 -c tessedit_char_whitelist="0123456789"',
+        )
+        found = re.findall(r"\d{1,2}", unicodedata.normalize("NFKC", text))
+        return found[0] if found else ""
+
+    header_segments: list[dict[str, int]] = []
+    for y1, y2 in header_bands:
+        x_hits: list[int] = []
+        for x in range(width):
+            total = max(1, y2 - y1)
+            colored = sum(1 for y in range(y1, y2) if is_header_pixel(image.getpixel((x, y))))
+            if colored / total > 0.32:
+                x_hits.append(x)
+        x_groups: list[list[int]] = []
+        for x in x_hits:
+            if not x_groups or x - x_groups[-1][-1] > 3:
+                x_groups.append([x])
+            else:
+                x_groups[-1].append(x)
+        for group in x_groups:
+            x1, x2 = min(group), max(group) + 1
+            if x2 - x1 < max(34, width * 0.035):
+                continue
+            token = ocr_digits(image.crop((x1, y1, x2, y2)))
+            if not token:
+                # Header numbers are centered; a slightly taller crop helps
+                # with black/blue bars where OCR may miss white text.
+                token = ocr_digits(image.crop((x1, max(0, y1 - 6), x2, min(height, y2 + 7))))
+            if token and 1 <= int(token) <= 18:
+                header_segments.append({"horse": int(token), "x1": x1, "x2": x2, "y1": y1, "y2": y2})
+
+    # Deduplicate noisy detections.
+    unique_segments: list[dict[str, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for seg in sorted(header_segments, key=lambda s: (s["y1"], s["x1"])):
+        key = (seg["horse"], round(seg["x1"] / 10), round(seg["y1"] / 10))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_segments.append(seg)
+    header_segments = unique_segments
+
+    # netkeiba's matrix headers for horse 1/2 are often white or pale grey,
+    # while frame-color headers from 3 onward are saturated.  Color detection
+    # can therefore miss early columns.  Infer missing columns on the same row
+    # from the detected frame-color columns' regular spacing.
+    augmented: list[dict[str, int]] = list(header_segments)
+    rows_by_y: list[list[dict[str, int]]] = []
+    for seg in sorted(header_segments, key=lambda s: (s["y1"], s["x1"])):
+        if not rows_by_y or abs(rows_by_y[-1][0]["y1"] - seg["y1"]) > 12:
+            rows_by_y.append([seg])
+        else:
+            rows_by_y[-1].append(seg)
+    for row_segments in rows_by_y:
+        row_segments = sorted(row_segments, key=lambda s: s["x1"])
+        if len(row_segments) < 2:
+            continue
+        centers = [int((s["x1"] + s["x2"]) / 2) for s in row_segments]
+        diffs = [centers[i + 1] - centers[i] for i in range(len(centers) - 1) if centers[i + 1] > centers[i]]
+        plausible_diffs = [d for d in diffs if width * 0.045 <= d <= width * 0.18]
+        if not plausible_diffs:
+            continue
+        step = sorted(plausible_diffs)[len(plausible_diffs) // 2]
+        col_w_values = [s["x2"] - s["x1"] for s in row_segments if s["x2"] > s["x1"]]
+        col_w = sorted(col_w_values)[len(col_w_values) // 2] if col_w_values else step - 2
+        for base in row_segments:
+            base_center = int((base["x1"] + base["x2"]) / 2)
+            for horse in range(1, 19):
+                projected = int(base_center + (horse - base["horse"]) * step)
+                if projected < col_w * 0.35 or projected > width - col_w * 0.35:
+                    continue
+                if any(abs(existing["y1"] - base["y1"]) <= 12 and existing["horse"] == horse for existing in augmented):
+                    continue
+                augmented.append({
+                    "horse": horse,
+                    "x1": max(0, int(projected - col_w / 2)),
+                    "x2": min(width, int(projected + col_w / 2)),
+                    "y1": base["y1"],
+                    "y2": base["y2"],
+                })
+    header_segments = sorted(augmented, key=lambda s: (s["y1"], s["x1"], s["horse"]))
+    if len(header_segments) < 4:
+        raise RuntimeError("色付き馬番ヘッダーを十分に検出できませんでした")
+
+    band_starts = sorted({seg["y1"] for seg in header_segments})
+
+    def next_band_y(current_y: int) -> int:
+        for y in band_starts:
+            if y > current_y + 8:
+                return y
+        return height
+
+    def ocr_rows(crop: Image.Image) -> list[tuple[int, float, bool]]:
+        # Keep hyphen so ワイドの「下限-上限」を平均値にできる。
+        scale = 3 if crop.width < 180 else 2
+        work = crop.resize((max(1, crop.width * scale), max(1, crop.height * scale)), Image.Resampling.LANCZOS)
+        work = ImageOps.autocontrast(work.convert("L"), cutoff=2)
+        work = ImageEnhance.Contrast(work).enhance(1.8)
+        text = pytesseract.image_to_string(
+            work,
+            lang="eng",
+            config='--psm 6 -c tessedit_char_whitelist="0123456789.-"',
+        )
+        rows: list[tuple[int, float, bool]] = []
+        for raw_line in text.splitlines():
+            line = unicodedata.normalize("NFKC", raw_line).strip().replace("ー", "-")
+            nums = re.findall(r"\d+(?:\.\d+)?", line)
+            if len(nums) < 2:
+                continue
+            try:
+                opponent = int(float(nums[0]))
+            except ValueError:
+                continue
+            if not 1 <= opponent <= 18:
+                continue
+            try:
+                values = [float(v) for v in nums[1:3]]
+            except ValueError:
+                continue
+            if not values:
+                continue
+            is_range = "-" in line and len(values) >= 2
+            odds = round(sum(values[:2]) / 2, 2) if is_range else values[0]
+            if odds >= 1.0:
+                rows.append((opponent, odds, is_range))
+        return rows
+
+    raw_entries: list[tuple[int, int, float, bool]] = []
+    for seg in header_segments:
+        crop_top = min(height, seg["y2"] + 1)
+        crop_bottom = max(crop_top, next_band_y(seg["y1"]) - 2)
+        if crop_bottom - crop_top < 18:
+            continue
+        pad = max(2, int(width * 0.003))
+        crop = image.crop((max(0, seg["x1"] - pad), crop_top, min(width, seg["x2"] + pad), crop_bottom))
+        for opponent, odds, is_range in ocr_rows(crop):
+            if opponent == seg["horse"]:
+                continue
+            raw_entries.append((seg["horse"], opponent, odds, is_range))
+
+    if len(raw_entries) < 10:
+        raise RuntimeError("全組み合わせ表から有効なオッズ行を十分に読み取れませんでした")
+
+    has_range = any(entry[3] for entry in raw_entries)
+    has_reverse_rows = any(opponent < horse for horse, opponent, _, _ in raw_entries)
+    ticket = "ワイド" if has_range else ("馬単" if has_reverse_rows else "馬連")
+
+    result: dict[str, float] = {}
+    for horse, opponent, odds, _ in raw_entries:
+        result[_odds_lookup_key(ticket, [str(horse), str(opponent)])] = odds
+
+    transcript = [
+        f"【全組み合わせ表OCR】券種推定: {ticket}",
+        f"色付き馬番ヘッダー{len(header_segments)}列 / オッズ{len(result)}件を読み取り",
+    ]
+    for key, odds in list(result.items())[:160]:
+        transcript.append(f"{key} {odds:g}")
+    return result, "\n".join(transcript)
 
 
 def _parse_netkeiba_vertical_odds_image_layout(image, pytesseract) -> tuple[dict[str, float], str]:
