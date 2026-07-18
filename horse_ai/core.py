@@ -9,6 +9,7 @@ import unicodedata
 from copy import deepcopy
 from datetime import datetime
 from io import BytesIO, StringIO
+from itertools import permutations
 from pathlib import Path
 from typing import Any
 
@@ -2109,16 +2110,23 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
     skipped: list[dict] = []
 
     style_settings = {
-        "的中30%型": {"max_points": 6, "wide_limit": 1, "quinella_limit": 3, "triple_limit": 1, "win_weight": 1.02, "min_wide_odds": 2.2, "target_hit": 33},
-        "標準": {"max_points": 8, "wide_limit": 2, "quinella_limit": 3, "triple_limit": 2, "win_weight": .98, "min_wide_odds": 2.4, "target_hit": 31},
-        "回収重視": {"max_points": 9, "wide_limit": 1, "quinella_limit": 4, "triple_limit": 4, "win_weight": .82, "min_wide_odds": 2.6, "target_hit": 28},
-        "高回収": {"max_points": 10, "wide_limit": 0, "quinella_limit": 3, "triple_limit": 6, "win_weight": .72, "min_wide_odds": 99.0, "target_hit": 24},
+        # 1着に来そう: 単勝は補助、馬連を厚め、3連複/3連単は上積み。
+        "勝ち切り": {"max_points": 8, "wide_limit": 0, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 1, "win_weight": .48, "min_wide_odds": 99.0, "target_hit": 30},
+        # 2着以内に来そう: 馬連を主戦、ワイドを必要最小限、3連複を少し。
+        "連軸": {"max_points": 8, "wide_limit": 2, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 0, "win_weight": .36, "min_wide_odds": 2.8, "target_hit": 32},
+        # 3着以内に来そう: ワイド厚め、馬連は相手上位、3連複で回収上積み。
+        "複圏": {"max_points": 9, "wide_limit": 3, "quinella_limit": 2, "triple_limit": 3, "trifecta_limit": 0, "win_weight": .24, "min_wide_odds": 3.0, "target_hit": 34},
+        "高回収": {"max_points": 10, "wide_limit": 0, "quinella_limit": 3, "triple_limit": 5, "trifecta_limit": 2, "win_weight": .20, "min_wide_odds": 99.0, "target_hit": 24},
+        # Backwards-compatible aliases for older drafts/tests.
+        "的中30%型": {"max_points": 8, "wide_limit": 2, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 0, "win_weight": .36, "min_wide_odds": 2.8, "target_hit": 32},
+        "標準": {"max_points": 8, "wide_limit": 2, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 0, "win_weight": .36, "min_wide_odds": 2.8, "target_hit": 32},
+        "回収重視": {"max_points": 9, "wide_limit": 1, "quinella_limit": 4, "triple_limit": 4, "trifecta_limit": 1, "win_weight": .28, "min_wide_odds": 3.2, "target_hit": 28},
     }
     setting = style_settings.get(style, style_settings["標準"])
     if not allow_torigami:
         setting = {
             **setting,
-            "wide_limit": 0 if style in {"回収重視", "高回収"} else min(1, int(setting["wide_limit"])),
+            "wide_limit": 0 if style in {"回収重視", "高回収", "勝ち切り"} else min(1, int(setting["wide_limit"])),
             "min_wide_odds": max(float(setting["min_wide_odds"]), 4.0),
             "max_points": max(3, int(setting["max_points"]) - 2),
         }
@@ -2140,7 +2148,7 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
             return
         confidence = sum(r["本命スコア"] for r in rs) / len(rs) / 5
         value = sum(r["妙味スコア"] for r in rs) / len(rs) / 5
-        hit_factor = {"単勝": .52, "馬連": .48, "ワイド": .70, "3連複": .32}.get(ticket, .45)
+        hit_factor = {"単勝": .52, "馬連": .48, "ワイド": .70, "馬単": .36, "3連複": .32, "3連単": .17}.get(ticket, .45)
         hit_index = max(5, min(90, confidence * hit_factor * 100 + (4 if anchor in nums else 0)))
         if ticket == "ワイド":
             hit_index = min(hit_index, 42)  # avoid presenting the portfolio as a high-hit-rate wide spread
@@ -2157,15 +2165,15 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
         else:
             candidates.append(item)
 
-    add("単勝", [anchor], setting["win_weight"] if popular_anchor else setting["win_weight"] * .82, "軸馬の勝ち切りで回収の芯を作る", "メイン")
+    add("単勝", [anchor], setting["win_weight"] if popular_anchor else setting["win_weight"] * .82, "単勝は勝ち切り確認用の補助として薄く持つ", "補助")
     for idx, opponent in enumerate(opponents[:int(setting["quinella_limit"])]):
-        add("馬連", [anchor, opponent], 1.20 - idx * .10, "軸馬の2着以内を想定する主戦買い目", "メイン")
+        add("馬連", [anchor, opponent], 1.34 - idx * .10, "軸馬の2着以内を想定する主戦買い目", "メイン")
     for idx, opponent in enumerate(opponents[:int(setting["wide_limit"])]):
-        add("ワイド", [anchor, opponent], .78 - idx * .08, "軸から最低限だけ保険を置く", "保険")
+        add("ワイド", [anchor, opponent], 1.08 - idx * .08 if style == "複圏" else .92 - idx * .08, "軸が3着以内に残る場合の主戦または保険", "メイン" if style == "複圏" else "保険")
     triple_limit = int(setting["triple_limit"])
     if triple_limit and len(opponents) >= 2:
         triple_pairs = []
-        if popular_anchor:
+        if style in {"勝ち切り", "連軸"} and popular_anchor:
             triple_pairs = [tuple(opponents[:2])]
         else:
             secondary = opponents[:4]
@@ -2173,20 +2181,26 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
                 for right in secondary[left_i + 1:]:
                     triple_pairs.append((left, right))
         for left, right in triple_pairs[:triple_limit]:
-            add("3連複", [anchor, left, right], .64 if style != "高回収" else .92, "軸が3着以内に残る場合の配当上積み", "上積み")
+            add("3連複", [anchor, left, right], .72 if style != "高回収" else .94, "軸が3着以内に残る場合の配当上積み", "上積み")
+    trifecta_limit = int(setting.get("trifecta_limit", 0))
+    if trifecta_limit and len(opponents) >= 2:
+        for left, right in list(permutations(opponents[:3], 2))[:trifecta_limit]:
+            add("3連単", [anchor, left, right], .58 if style == "勝ち切り" else .72, "勝ち切り想定が強い時だけ1着固定で小さく上積み", "上積み")
 
     max_points = min(max(1, budget // unit), int(setting["max_points"]))
+    role_order = ["メイン", "上積み", "保険", "補助"]
     by_role = {
         role: sorted([item for item in candidates if item.get("買い目役割") == role], key=lambda x: x["買い目スコア"], reverse=True)
-        for role in ["メイン", "上積み", "保険"]
+        for role in role_order
     }
     selected: list[dict] = []
     role_targets = {
-        "メイン": min(len(by_role["メイン"]), max(2, max_points // 2)),
+        "メイン": min(len(by_role["メイン"]), max(2, max_points // 2 + (1 if style in {"連軸", "複圏"} else 0))),
         "上積み": min(len(by_role["上積み"]), max(1, max_points // 3)),
         "保険": min(len(by_role["保険"]), 1 if style in {"高回収", "回収重視"} else 2),
+        "補助": min(len(by_role["補助"]), 1),
     }
-    for role in ["メイン", "上積み", "保険"]:
+    for role in role_order:
         selected.extend(by_role[role][:role_targets[role]])
     if len(selected) < max_points:
         selected_keys = {item["買い目"] for item in selected}
@@ -2197,9 +2211,10 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
         return [], skipped
     usable = (budget // unit) * unit
     role_share = {
-        "メイン": .66 if style not in {"高回収", "回収重視"} else .52,
-        "上積み": .24 if style != "的中30%型" else .14,
-        "保険": .10 if style != "高回収" else .04,
+        "メイン": .72 if style in {"連軸", "複圏"} else .68 if style == "勝ち切り" else .56,
+        "上積み": .20 if style in {"勝ち切り", "連軸"} else .18 if style == "複圏" else .34,
+        "保険": .06 if style != "高回収" else .02,
+        "補助": .02 if style in {"連軸", "複圏"} else .04,
     }
     role_buckets: dict[str, list[dict]] = {}
     for item in selected:
@@ -2235,10 +2250,10 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
     preferred_types = _ticket_preferences_from_profile(prediction_profile)
     odds_calibration = prediction_profile.get("odds_calibration", {}) if isinstance(prediction_profile, dict) else {}
     anchor_styles = {
-        "軸セット": ("標準", "単勝・馬連・ワイド中心"),
-        "的中30%型": ("的中30%型", "点数を絞り、軸の2着以内を主戦にする"),
-        "回収重視": ("回収重視", "馬連と3連複の上積みで回収率を狙う"),
-        "高回収狙い": ("高回収", "ワイドを抑え、三連系の上振れを狙う"),
+        "勝ち切り型": ("勝ち切り", "1着想定。馬連を主戦に、単勝は補助、3連系は上積み"),
+        "連軸型": ("連軸", "2着以内想定。馬連を厚め、ワイドと3連複を必要分だけ"),
+        "複圏型": ("複圏", "3着以内想定。ワイドを厚め、馬連と3連複で回収を補う"),
+        "高回収狙い": ("高回収", "トリガミを避けつつ、馬連・3連系の上振れを狙う"),
     }
     plans = {}
     for name, (style, label) in anchor_styles.items():
@@ -2275,10 +2290,12 @@ def propose_bet_plans(rows: list[dict], marks: dict, budget: int, unit: int, min
                 base += min(4.0, overlap * 0.65)
                 if name == "実績反映":
                     base += 1.5
-            if name == "軸セット":
+            if name == "連軸型":
                 base += 3.0
-            if name == "的中30%型":
+            if name == "複圏型":
                 base += 2.0
+            if name == "勝ち切り型":
+                base += 1.5
             if name == "高回収狙い":
                 base -= 1.0
             return base

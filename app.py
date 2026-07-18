@@ -1064,7 +1064,7 @@ def step3():
 def step5():
     page_head(5, "AIが買い方を組み立てる", "全8券種を横断し、的中・回収・蓄積実績の視点から買い方を比較します。")
     if not race["score_results"]: st.warning("先に手順3でスコアを生成してください。"); return
-    st.markdown('<div class="guide">券種や点数の指定は不要です。単勝から三連単までを機械的に比較し、予算と最低購入単位から点数を自動で絞ります。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="guide">軸馬を「1着候補・2着以内候補・3着以内候補」の型で捉え、単勝は補助、馬連・ワイドを厚め、3連系は上積みとして自動調整します。</div>', unsafe_allow_html=True)
     with st.container(border=True):
         section_label("AIに渡す購入条件")
         cols = st.columns(3)
@@ -1092,11 +1092,11 @@ def step5():
         plan_names = list(race["bet_plans"])
         plan_cols = st.columns(len(plan_names))
         descriptions = {
-            "軸セット": "軸1頭から単勝・馬連・ワイドをセット買い",
-            "的中30%型": "点数を絞り、軸の2着以内を主戦にする",
-            "回収重視": "馬連と3連複の上積みで回収率を狙う",
+            "勝ち切り型": "1着想定。馬連主戦＋単勝補助＋3連系上積み",
+            "連軸型": "2着以内想定。馬連厚め＋ワイド少し＋3連複",
+            "複圏型": "3着以内想定。ワイド厚め＋馬連＋3連複",
             "実績反映": "買い目実績ラボで成績が出ている券種を参考",
-            "高回収狙い": "ワイドを抑え、三連系の上振れを狙う",
+            "高回収狙い": "保険を抑え、馬連・三連系の上振れを狙う",
         }
         for col, name in zip(plan_cols, plan_names):
             plan = race["bet_plans"][name]; summary = plan["summary"]
