@@ -2735,7 +2735,7 @@ def extract_netkeiba_race_table_image_with_tesseract(data: bytes, filename: str 
     return info, horses, "\n".join(transcript_lines), list(dict.fromkeys(warnings))
 
 
-def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, float], str]:
+def parse_netkeiba_popular_odds_image_layout(data: bytes, max_vertical_rows: int = 50) -> tuple[dict[str, float], str]:
     """Read netkeiba popular-odds screenshot by fixed cell regions.
 
     This intentionally avoids Japanese OCR and reads only numeric cells from the
@@ -2753,7 +2753,7 @@ def parse_netkeiba_popular_odds_image_layout(data: bytes) -> tuple[dict[str, flo
     image = ImageOps.autocontrast(image, cutoff=1)
     width, height = image.size
     if height / max(1, width) > 2.1:
-        return _parse_netkeiba_vertical_odds_image_layout(image, pytesseract)
+        return _parse_netkeiba_vertical_odds_image_layout(image, pytesseract, max_rows=max_vertical_rows)
     matrix_note = ""
     try:
         matrix_result, matrix_note = _parse_netkeiba_matrix_odds_image_layout(image, pytesseract)
@@ -3078,7 +3078,7 @@ def _parse_netkeiba_matrix_odds_image_layout(image, pytesseract) -> tuple[dict[s
     return result, "\n".join(transcript)
 
 
-def _parse_netkeiba_vertical_odds_image_layout(image, pytesseract) -> tuple[dict[str, float], str]:
+def _parse_netkeiba_vertical_odds_image_layout(image, pytesseract, max_rows: int = 50) -> tuple[dict[str, float], str]:
     """Read netkeiba ticket-specific popular odds list screenshots.
 
     This targets the long vertical "人気順" pages where one ticket type is
@@ -3141,9 +3141,9 @@ def _parse_netkeiba_vertical_odds_image_layout(image, pytesseract) -> tuple[dict
     top_center = 0.1245
     row_h = 0.00875
     cell_h = 0.0068
-    max_rows = min(100, max(1, int((0.988 - top_center) / row_h)))
+    max_rows = min(max(1, int(max_rows or 50)), 100, max(1, int((0.988 - top_center) / row_h)))
     result: dict[str, float] = {}
-    transcript: list[str] = [f"【券種別人気順OCR】券種推定: {ticket}", header_text[:300]]
+    transcript: list[str] = [f"【券種別人気順OCR】券種推定: {ticket}", f"読み取り上限: 人気順{max_rows}件", header_text[:300]]
     empty_streak = 0
     for idx in range(max_rows):
         center = top_center + row_h * idx

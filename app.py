@@ -4,6 +4,7 @@ import json
 import os
 import html
 import hmac
+import hashlib
 import importlib.util
 import platform
 import re
@@ -1297,6 +1298,15 @@ def step4():
             key="popular_odds_image",
             help="全券種まとめ画像より、単勝・馬連・ワイド・3連複など券種別の上位人気スクショを複数入れる方が精度が上がります。",
         )
+        odds_reading_mode = st.radio(
+            "オッズ画像の解析モード",
+            ["軽量", "標準", "詳細"],
+            horizontal=True,
+            index=0,
+            help="軽量は3連系の人気順を上位30件までに絞ります。標準は50件、詳細は100件まで読みます。馬連・ワイド・馬単の全組み合わせ表は専用処理で読みます。",
+        )
+        max_rows_by_mode = {"軽量": 30, "標準": 50, "詳細": 100}
+        max_vertical_rows = max_rows_by_mode.get(odds_reading_mode, 30)
         ocr_mode = st.radio(
             "画像読み取り方法",
             ["固定レイアウトOCR", "無料OCRを優先"],
@@ -1305,7 +1315,7 @@ def step4():
         )
         image_parsed = race.get("popular_odds_image_parsed", {})
         if odds_images:
-            st.caption(f"{len(odds_images)}枚のオッズ画像を選択中。券種別スクショを複数入れると、馬連・ワイド・3連複の実オッズに近づきます。")
+            st.caption(f"{len(odds_images)}枚のオッズ画像を選択中。{odds_reading_mode}モードでは、縦長の人気順表は上位{max_vertical_rows}件まで読みます。")
             preview_cols = st.columns(min(3, len(odds_images)))
             for idx, odds_image in enumerate(odds_images[:3]):
                 with preview_cols[idx % len(preview_cols)]:
@@ -1318,20 +1328,31 @@ def step4():
                     transcript_parts = []
                     method_parts = []
                     errors = []
+                    cache = race.setdefault("popular_odds_image_cache", {})
+                    cache_hits = 0
                     for odds_image in odds_images:
                         image_bytes_data = odds_image.getvalue()
+                        digest = hashlib.sha256(image_bytes_data).hexdigest()
+                        cache_key = f"v2:{ocr_mode}:{odds_reading_mode}:{max_vertical_rows}:{digest}"
                         local_mode = ocr_mode
                         transcript = ""
                         parsed = {}
                         method = ""
                         name = getattr(odds_image, "name", "画像")
+                        cached = cache.get(cache_key)
+                        if isinstance(cached, dict) and cached.get("parsed"):
+                            parsed = cached.get("parsed", {})
+                            transcript = cached.get("transcript", "")
+                            method = cached.get("method", "画像OCRキャッシュ")
+                            cache_hits += 1
                         if local_mode == "固定レイアウトOCR":
-                            try:
-                                parsed, transcript = parse_netkeiba_popular_odds_image_layout(image_bytes_data)
-                                method = "固定レイアウトOCR"
-                            except Exception as layout_exc:
-                                errors.append(f"{name}: 固定レイアウトOCR不可 → 無料OCRへ切替（{layout_exc}）")
-                                local_mode = "無料OCRを優先"
+                            if not parsed:
+                                try:
+                                    parsed, transcript = parse_netkeiba_popular_odds_image_layout(image_bytes_data, max_vertical_rows=max_vertical_rows)
+                                    method = f"固定レイアウトOCR（{odds_reading_mode}）"
+                                except Exception as layout_exc:
+                                    errors.append(f"{name}: 固定レイアウトOCR不可 → 無料OCRへ切替（{layout_exc}）")
+                                    local_mode = "無料OCRを優先"
                         if local_mode == "無料OCRを優先" and not parsed:
                             try:
                                 transcript = ocr_text_with_macos_vision(image_bytes_data) if IS_MAC else ocr_popular_odds_image_with_tesseract(image_bytes_data)
@@ -1343,6 +1364,14 @@ def step4():
                             merged_parsed.update(parsed)
                             transcript_parts.append(f"【{name} / {method or '画像OCR'}】\n{transcript}")
                             method_parts.append(method or "画像OCR")
+                            cache[cache_key] = {
+                                "name": name,
+                                "parsed": parsed,
+                                "transcript": transcript,
+                                "method": method or "画像OCR",
+                                "count": len(parsed),
+                                "created_at": datetime.now().isoformat(timespec="seconds"),
+                            }
                         else:
                             errors.append(f"{name}: オッズ表を読み取れませんでした")
                     if not merged_parsed:
@@ -1350,6 +1379,8 @@ def step4():
                     if errors:
                         for message in errors[:5]:
                             st.warning(message)
+                    if cache_hits:
+                        st.info(f"{cache_hits}枚は保存済みの読み取り結果を使いました。", icon=":material/cached:")
                     race["popular_odds_snapshot_text"] = "\n\n".join(transcript_parts)
                     race["popular_odds_image_method"] = " / ".join(sorted(set(method_parts))) or "画像OCR"
                     race["popular_odds_image_parsed"] = merged_parsed
