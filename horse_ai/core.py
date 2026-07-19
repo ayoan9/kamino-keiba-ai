@@ -36,6 +36,15 @@ PRESETS = {
     "展開重視": {"展開利": 1.8, "近走評価": .9},
 }
 
+PRESET_SCORE_MIX = {
+    "標準": {"本命スコア": .45, "条件適性スコア": .30, "妙味スコア": .25},
+    "単勝勝負": {"本命スコア": .62, "条件適性スコア": .25, "妙味スコア": .13},
+    "軸安定": {"本命スコア": .58, "条件適性スコア": .32, "妙味スコア": .10},
+    "穴狙い": {"本命スコア": .25, "条件適性スコア": .30, "妙味スコア": .45},
+    "馬場重視": {"本命スコア": .34, "条件適性スコア": .46, "妙味スコア": .20},
+    "展開重視": {"本命スコア": .36, "条件適性スコア": .42, "妙味スコア": .22},
+}
+
 HORSE_COLUMNS = ["馬番", "枠番", "馬名", "性齢", "斤量", "騎手", "厩舎", "人気", "単勝オッズ", "脚質", "父", "母", "母父", "過去走テキスト", "コメント"]
 
 DEFAULT_LAYOUT_PROFILE = {
@@ -215,6 +224,7 @@ def new_state() -> dict[str, Any]:
         "horses": [], "ai_scores": {}, "final_scores": {}, "ai_comments": {}, "risk_comments": {},
         "evaluation_source": "",
         "score_results": [], "marks": {}, "weights": {k: 1.0 for k in SCORE_KEYS},
+        "selected_preset": "標準", "score_mix": PRESET_SCORE_MIX["標準"],
         "bets": [], "bet_plans": {}, "selected_bet_plan": "AIおすすめ", "skipped_bets": [], "odds_history": [], "alerts": [],
         "allow_torigami": True,
         "jra_fetch_schedule": [], "jra_auto_fetch_log": [],
@@ -1627,6 +1637,9 @@ def calculate_scores(horses: list[dict], final_scores: dict, multipliers: dict) 
     rows = []
     evidence_signals = []
     field_size = max(2, len(horses))
+    score_mix = multipliers.get("__score_mix", PRESET_SCORE_MIX["標準"]) if isinstance(multipliers, dict) else PRESET_SCORE_MIX["標準"]
+    score_mix = score_mix if isinstance(score_mix, dict) else PRESET_SCORE_MIX["標準"]
+    mix_total = sum(float(score_mix.get(key, 0)) for key in ["本命スコア", "条件適性スコア", "妙味スコア"]) or 1.0
     for h in horses:
         no = str(h.get("馬番", "")); s = final_scores.get(no, {k: 3 for k in SCORE_KEYS})
         subs = {}
@@ -1634,7 +1647,11 @@ def calculate_scores(horses: list[dict], final_scores: dict, multipliers: dict) 
             weighted = sum(float(s.get(k, 3)) * w * float(multipliers.get(k, 1)) for k, w in weights.items())
             denom = sum(w * float(multipliers.get(k, 1)) for k, w in weights.items())
             subs[label] = weighted / denom if denom else 0
-        total = subs["本命スコア"] * .45 + subs["条件適性スコア"] * .30 + subs["妙味スコア"] * .25
+        total = (
+            subs["本命スコア"] * float(score_mix.get("本命スコア", .45))
+            + subs["条件適性スコア"] * float(score_mix.get("条件適性スコア", .30))
+            + subs["妙味スコア"] * float(score_mix.get("妙味スコア", .25))
+        ) / mix_total
         finishes = [int(v) for v in re.findall(r"(?:芝|ダート|ダ)\s*\d{3,4}\s+(\d{1,2})\s+(?:右|左|直)", str(h.get("過去走テキスト", "")))[:5]]
         recent = 1 - (min(field_size, sum(finishes) / len(finishes)) - 1) / (field_size - 1) if finishes else .5
         popularity = max(1, min(field_size, int(_float(h.get("人気"), field_size))))

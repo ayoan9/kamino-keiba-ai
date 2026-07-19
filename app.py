@@ -20,7 +20,7 @@ import altair as alt
 import streamlit as st
 
 from horse_ai.core import (
-    HORSE_COLUMNS, PRESETS, SCORE_KEYS, analyze_race_trends, archive_prediction, available_ollama_models, calculate_scores,
+    HORSE_COLUMNS, PRESETS, PRESET_SCORE_MIX, SCORE_KEYS, analyze_race_trends, archive_prediction, available_ollama_models, calculate_scores,
     compare_odds, evaluate_with_ollama,
     extract_screenshot_with_macos_vision, extract_netkeiba_race_table_image_with_tesseract,
     extract_netkeiba_newspaper_pdf, generate_marks, align_marks_to_bets,
@@ -223,6 +223,8 @@ def init():
     weights = st.session_state.race.setdefault("weights", {})
     weights.pop("血統評価", None)
     for key in SCORE_KEYS: weights.setdefault(key, 1.0)
+    selected_preset = st.session_state.race.setdefault("selected_preset", "標準")
+    st.session_state.race.setdefault("score_mix", PRESET_SCORE_MIX.get(selected_preset, PRESET_SCORE_MIX["標準"]))
     if "step" not in st.session_state: st.session_state.step = 1
     if "budget" not in st.session_state: st.session_state.budget = 5000
     if "unit" not in st.session_state: st.session_state.unit = 100
@@ -578,7 +580,7 @@ def run_jra_fetch_job(current_race: dict, job: dict) -> None:
                 if key in snapshot["odds"]:
                     horse["単勝オッズ"] = snapshot["odds"][key]
             if current_race.get("final_scores"):
-                current_race["score_results"] = calculate_scores(current_race["horses"], current_race["final_scores"], current_race["weights"])
+                current_race["score_results"] = calculate_scores(current_race["horses"], current_race["final_scores"], {**current_race["weights"], "__score_mix": current_race.get("score_mix", PRESET_SCORE_MIX["標準"])})
             if current_race.get("score_results"):
                 current_race["bet_plans"] = propose_bet_plans(
                     current_race["score_results"],
@@ -995,19 +997,44 @@ def step2():
 def step3():
     page_head(3, "スコアと印を組み立てる", "重視する観点を選び、評価をランキングと印へ変換します。")
     if not race["final_scores"]: st.warning("先に手順2で評価を確定してください。"); return
+    race.setdefault("selected_preset", "標準")
+    race.setdefault("score_mix", PRESET_SCORE_MIX.get(race.get("selected_preset", "標準"), PRESET_SCORE_MIX["標準"]))
+
+    def apply_preset_style(name: str) -> None:
+        race["selected_preset"] = name
+        race["weights"] = {k: float(PRESETS.get(name, {}).get(k, 1.0)) for k in SCORE_KEYS}
+        race["score_mix"] = PRESET_SCORE_MIX.get(name, PRESET_SCORE_MIX["標準"])
+        for score_key in SCORE_KEYS:
+            st.session_state[f"weight_{score_key}"] = float(race["weights"].get(score_key, 1.0))
+
     c1, c2 = st.columns([2,1])
-    with c1: preset = st.selectbox("予想スタイル", list(PRESETS), key="preset", help="選んだスタイルに合わせて8項目の重みを調整します")
+    preset_names = list(PRESETS)
+    default_preset_index = option_index(preset_names, race.get("selected_preset", "標準"))
+    with c1:
+        preset = st.selectbox("予想スタイル", preset_names, index=default_preset_index, key="preset", help="選んだスタイルに合わせて8項目と総合配分を調整します")
+    if preset != race.get("selected_preset"):
+        apply_preset_style(preset)
+        race["score_results"] = calculate_scores(race["horses"], race["final_scores"], {**race["weights"], "__score_mix": race["score_mix"]})
+        race["marks"] = generate_marks(race["score_results"])
+        persist(f"予想スタイルを{preset}へ変更しました")
+        st.rerun()
     with c2:
         st.write("")
         if st.button("スタイルを適用", width="stretch"):
-            race["weights"] = {k: PRESETS[preset].get(k, 1.0) for k in SCORE_KEYS}; st.rerun()
+            apply_preset_style(preset)
+            race["score_results"] = calculate_scores(race["horses"], race["final_scores"], {**race["weights"], "__score_mix": race["score_mix"]})
+            race["marks"] = generate_marks(race["score_results"])
+            persist(f"予想スタイルを{preset}へ適用しました")
+            st.rerun()
+    mix = race.get("score_mix", PRESET_SCORE_MIX["標準"])
+    st.caption(f'総合配分: 本命 {float(mix.get("本命スコア", .45)):.0%} / 条件 {float(mix.get("条件適性スコア", .30)):.0%} / 妙味 {float(mix.get("妙味スコア", .25)):.0%}')
     with st.expander("詳細な重みを調整", expanded=False):
         st.caption("通常はプリセットのままで構いません。0.5〜2.0倍で微調整できます。")
         cols = st.columns(3)
         for i, key in enumerate(SCORE_KEYS):
             with cols[i%3]: race["weights"][key] = st.slider(key, .5, 2.0, float(race["weights"].get(key,1)), .05, key=f"weight_{key}")
     if st.button("スコアと印を生成", type="primary", icon=":material/flag:"):
-        race["score_results"] = calculate_scores(race["horses"], race["final_scores"], race["weights"])
+        race["score_results"] = calculate_scores(race["horses"], race["final_scores"], {**race["weights"], "__score_mix": race.get("score_mix", PRESET_SCORE_MIX["標準"])})
         race["marks"] = generate_marks(race["score_results"]); persist("スコアと印を保存しました")
     if race["score_results"]:
         display = pd.DataFrame([{**r, "印": race["marks"].get(str(r["馬番"]), "")} for r in race["score_results"]])
@@ -1461,7 +1488,7 @@ def step4():
                     ratio = now / prev
                     old = race["final_scores"][no]["妙味"]
                     race["final_scores"][no]["妙味"] = max(1, min(5, old + (1 if ratio >= 1.25 else -1 if ratio <= .7 else 0)))
-        race["score_results"] = calculate_scores(race["horses"], race["final_scores"], race["weights"])
+        race["score_results"] = calculate_scores(race["horses"], race["final_scores"], {**race["weights"], "__score_mix": race.get("score_mix", PRESET_SCORE_MIX["標準"])})
         race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(st.session_state.budget), int(st.session_state.unit), float(st.session_state.min_odds), current, load_prediction_profile(), allow_torigami=bool(race.get("allow_torigami", True)))
         selected_name = race.get("selected_bet_plan")
         if selected_name not in race["bet_plans"]:

@@ -1,4 +1,4 @@
-from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_odds_calibration, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, parse_single_odds_text, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_prediction_profile, update_betting_journal_entry
+from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, PRESET_SCORE_MIX, PRESETS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_odds_calibration, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, parse_single_odds_text, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_prediction_profile, update_betting_journal_entry
 from horse_ai.historical import _available_month_tokens, _day_races, _result_detail, aggregate_history
 from horse_ai.jra_fetcher import _anchor_actions, _race_identity, _single_odds, _tables
 
@@ -24,6 +24,21 @@ def test_pedigree_is_folded_into_course_and_track_without_separate_score():
     assert all("血統評価" not in weights for weights in BASE_WEIGHTS.values())
     assert all(abs(sum(weights.values()) - 1.0) < 1e-9 for weights in BASE_WEIGHTS.values())
     assert "距離・コース適性と馬場適性" in _evaluation_prompt([], {}, "")
+
+
+def test_prediction_style_changes_total_scores():
+    horses, scores = sample()
+    standard = calculate_scores(
+        horses,
+        scores,
+        {key: PRESETS["標準"].get(key, 1.0) for key in SCORE_KEYS} | {"__score_mix": PRESET_SCORE_MIX["標準"]},
+    )
+    value_style = calculate_scores(
+        horses,
+        scores,
+        {key: PRESETS["穴狙い"].get(key, 1.0) for key in SCORE_KEYS} | {"__score_mix": PRESET_SCORE_MIX["穴狙い"]},
+    )
+    assert [row["総合スコア"] for row in standard] != [row["総合スコア"] for row in value_style]
 
 
 def test_ai_bet_plans_choose_points_and_ticket_types_without_user_limit():
