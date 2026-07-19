@@ -2095,6 +2095,7 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
     popularity = _float(anchor_row.get("人気"), 99)
     single_odds = _float(anchor_row.get("単勝オッズ"), 12)
     popular_anchor = popularity <= 5 or single_odds <= 10
+    longshot_anchor = popularity >= 6 or single_odds >= 12
     usable_rows = [r for r in rows if str(r["馬番"]) != anchor and marks.get(str(r["馬番"])) != "消"]
     opponents = [
         str(r["馬番"]) for r in sorted(
@@ -2148,7 +2149,7 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
             return
         confidence = sum(r["本命スコア"] for r in rs) / len(rs) / 5
         value = sum(r["妙味スコア"] for r in rs) / len(rs) / 5
-        hit_factor = {"単勝": .52, "馬連": .48, "ワイド": .70, "馬単": .36, "3連複": .32, "3連単": .17}.get(ticket, .45)
+        hit_factor = {"単勝": .52, "複勝": .82, "馬連": .48, "ワイド": .70, "馬単": .36, "3連複": .32, "3連単": .17}.get(ticket, .45)
         hit_index = max(5, min(90, confidence * hit_factor * 100 + (4 if anchor in nums else 0)))
         if ticket == "ワイド":
             hit_index = min(hit_index, 42)  # avoid presenting the portfolio as a high-hit-rate wide spread
@@ -2166,6 +2167,8 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
             candidates.append(item)
 
     add("単勝", [anchor], setting["win_weight"] if popular_anchor else setting["win_weight"] * .82, "単勝は勝ち切り確認用の補助として薄く持つ", "補助")
+    if style == "複圏" and longshot_anchor:
+        add("複勝", [anchor], .82, "中穴〜大穴軸の3着以内想定を直接拾う", "メイン")
     for idx, opponent in enumerate(opponents[:int(setting["quinella_limit"])]):
         add("馬連", [anchor, opponent], 1.34 - idx * .10, "軸馬の2着以内を想定する主戦買い目", "メイン")
     for idx, opponent in enumerate(opponents[:int(setting["wide_limit"])]):

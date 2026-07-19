@@ -42,6 +42,15 @@ def test_ai_bet_plans_choose_points_and_ticket_types_without_user_limit():
     assert any(bet["券種"] in {"3連複", "3連単"} for bet in plans["高回収狙い"]["bets"])
 
 
+def test_place_bet_is_considered_for_longshot_show_anchor():
+    horses, scores = sample()
+    horses[0]["人気"] = 8
+    horses[0]["単勝オッズ"] = 18.0
+    rows = calculate_scores(horses, scores, {key: 1 for key in SCORE_KEYS})
+    plans = propose_bet_plans(rows, generate_marks(rows), 5000, 100, 1.1)
+    assert any(bet["券種"] == "複勝" for bet in plans["複圏型"]["bets"])
+
+
 def test_ai_bet_plans_add_personal_results_viewpoint():
     horses, scores = sample()
     rows = calculate_scores(horses, scores, {key: 1 for key in SCORE_KEYS})
