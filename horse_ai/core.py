@@ -1938,8 +1938,12 @@ def _estimated_odds(bet_type: str, rs: list[dict], odds_calibration: dict | None
     singles = [max(1.1, _float(r.get("単勝オッズ"), 8)) for r in rs]
     powers = {"単勝": 1.0, "複勝": .42, "枠連": .50, "馬連": .66, "ワイド": .42, "馬単": .80, "3連複": .86, "3連単": 1.08}
     discounts = {"単勝": 1.0, "複勝": .72, "枠連": .88, "馬連": 1.08, "ワイド": .74, "馬単": 1.26, "3連複": 1.55, "3連単": 1.95}
+    # The previous estimator tended to be conservative versus actual pool odds,
+    # especially for exotic bets.  Apply a mild upward bias only to estimated
+    # odds; live/entered odds still override this value unchanged.
+    estimate_bias = {"単勝": 1.05, "複勝": 1.08, "枠連": 1.10, "馬連": 1.18, "ワイド": 1.12, "馬単": 1.22, "3連複": 1.28, "3連単": 1.36}
     base = max(1.1, math.prod(singles) ** powers[bet_type] * discounts[bet_type])
-    return max(1.1, base * _odds_calibration_multiplier(bet_type, odds_calibration))
+    return max(1.1, base * estimate_bias.get(bet_type, 1.0) * _odds_calibration_multiplier(bet_type, odds_calibration))
 
 
 def _odds_lookup_key(bet_type: str, nums: list[str]) -> str:
@@ -2129,16 +2133,16 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
 
     style_settings = {
         # 1着に来そう: 馬連を主戦、3連系は上積み、単勝は補助。
-        "勝ち切り": {"max_points": 7, "wide_limit": 0, "quinella_limit": 4, "triple_limit": 1, "trifecta_limit": 1, "win_weight": .55, "min_wide_odds": 99.0, "target_hit": 30},
+        "勝ち切り": {"max_points": 8, "wide_limit": 0, "quinella_limit": 5, "triple_limit": 1, "trifecta_limit": 1, "win_weight": .55, "min_wide_odds": 99.0, "target_hit": 30},
         # 2着以内に来そう: ワイドを厚めにして馬連、3連系は控えめ。
-        "連軸": {"max_points": 7, "wide_limit": 3, "quinella_limit": 3, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.6, "target_hit": 32},
+        "連軸": {"max_points": 9, "wide_limit": 4, "quinella_limit": 4, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.5, "target_hit": 32},
         # 3着以内に来そう: 複勝/ワイドを最優先、馬連、3連複は余力があれば。
-        "複圏": {"max_points": 8, "wide_limit": 3, "quinella_limit": 2, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .24, "min_wide_odds": 2.8, "target_hit": 34},
-        "高回収": {"max_points": 8, "wide_limit": 0, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 1, "win_weight": .24, "min_wide_odds": 99.0, "target_hit": 24},
+        "複圏": {"max_points": 10, "wide_limit": 4, "quinella_limit": 3, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .24, "min_wide_odds": 2.6, "target_hit": 34},
+        "高回収": {"max_points": 9, "wide_limit": 0, "quinella_limit": 5, "triple_limit": 2, "trifecta_limit": 1, "win_weight": .24, "min_wide_odds": 99.0, "target_hit": 24},
         # Backwards-compatible aliases for older drafts/tests.
-        "的中30%型": {"max_points": 7, "wide_limit": 3, "quinella_limit": 3, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.6, "target_hit": 32},
-        "標準": {"max_points": 7, "wide_limit": 3, "quinella_limit": 3, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.6, "target_hit": 32},
-        "回収重視": {"max_points": 8, "wide_limit": 1, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 1, "win_weight": .28, "min_wide_odds": 3.2, "target_hit": 28},
+        "的中30%型": {"max_points": 9, "wide_limit": 4, "quinella_limit": 4, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.5, "target_hit": 32},
+        "標準": {"max_points": 9, "wide_limit": 4, "quinella_limit": 4, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.5, "target_hit": 32},
+        "回収重視": {"max_points": 9, "wide_limit": 1, "quinella_limit": 5, "triple_limit": 2, "trifecta_limit": 1, "win_weight": .28, "min_wide_odds": 3.0, "target_hit": 28},
     }
     setting = style_settings.get(style, style_settings["標準"])
     if not allow_torigami:
