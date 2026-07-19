@@ -34,6 +34,7 @@ from horse_ai.jra_fetcher import fetch_jra_odds, fetch_jra_result
 from horse_ai.historical import history_job_status, load_cached_history, start_history_job
 
 IS_MAC = platform.system() == "Darwin"
+CURRENT_BET_PLAN_NAMES = {"勝ち切り型", "連軸型", "複圏型", "高回収狙い", "実績反映"}
 
 st.set_page_config(
     page_title="競馬予想AI｜カミノ競馬クラブ",
@@ -1078,6 +1079,17 @@ def step5():
         )
         race["allow_torigami"] = allow_torigami
         st.caption("点数は入力しません。100円単位・予算上限・候補の質から自動決定します。")
+    existing_plan_names = set(race.get("bet_plans", {}) or {})
+    if existing_plan_names and not existing_plan_names.issubset(CURRENT_BET_PLAN_NAMES):
+        latest_odds = race["odds_history"][-1].get("odds", {}) if race.get("odds_history") else {}
+        race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(budget), int(unit), float(min_odds), latest_odds, load_prediction_profile(), allow_torigami=allow_torigami)
+        recommended = next((name for name, plan in race["bet_plans"].items() if plan.get("recommended")), next(iter(race["bet_plans"]), ""))
+        race["selected_bet_plan"] = recommended
+        selected = race["bet_plans"].get(recommended, {})
+        race["bets"], race["skipped_bets"] = selected.get("bets", []), selected.get("skipped", [])
+        race["marks"] = align_marks_to_bets(race["score_results"], race["bets"], race.get("marks", {}))
+        persist("古い買い方プランを最新ロジックで再生成しました")
+        st.info("古い買い方プランを検出したため、勝ち切り型・連軸型・複圏型を含む最新ロジックで再生成しました。", icon=":material/autorenew:")
     if st.button("全券種を分析して買い方を提案", type="primary", icon=":material/psychology:"):
         latest_odds = race["odds_history"][-1].get("odds", {}) if race.get("odds_history") else {}
         race["bet_plans"] = propose_bet_plans(race["score_results"], race["marks"], int(budget), int(unit), float(min_odds), latest_odds, load_prediction_profile(), allow_torigami=allow_torigami)
