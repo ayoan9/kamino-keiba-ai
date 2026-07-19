@@ -2111,17 +2111,17 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
     skipped: list[dict] = []
 
     style_settings = {
-        # 1着に来そう: 単勝は補助、馬連を厚め、3連複/3連単は上積み。
-        "勝ち切り": {"max_points": 8, "wide_limit": 0, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 1, "win_weight": .48, "min_wide_odds": 99.0, "target_hit": 30},
-        # 2着以内に来そう: 馬連を主戦、ワイドを必要最小限、3連複を少し。
-        "連軸": {"max_points": 8, "wide_limit": 2, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 0, "win_weight": .36, "min_wide_odds": 2.8, "target_hit": 32},
-        # 3着以内に来そう: ワイド厚め、馬連は相手上位、3連複で回収上積み。
-        "複圏": {"max_points": 9, "wide_limit": 3, "quinella_limit": 2, "triple_limit": 3, "trifecta_limit": 0, "win_weight": .24, "min_wide_odds": 3.0, "target_hit": 34},
-        "高回収": {"max_points": 10, "wide_limit": 0, "quinella_limit": 3, "triple_limit": 5, "trifecta_limit": 2, "win_weight": .20, "min_wide_odds": 99.0, "target_hit": 24},
+        # 1着に来そう: 馬連を主戦、3連系は上積み、単勝は補助。
+        "勝ち切り": {"max_points": 7, "wide_limit": 0, "quinella_limit": 4, "triple_limit": 1, "trifecta_limit": 1, "win_weight": .55, "min_wide_odds": 99.0, "target_hit": 30},
+        # 2着以内に来そう: ワイドを厚めにして馬連、3連系は控えめ。
+        "連軸": {"max_points": 7, "wide_limit": 3, "quinella_limit": 3, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.6, "target_hit": 32},
+        # 3着以内に来そう: 複勝/ワイドを最優先、馬連、3連複は余力があれば。
+        "複圏": {"max_points": 8, "wide_limit": 3, "quinella_limit": 2, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .24, "min_wide_odds": 2.8, "target_hit": 34},
+        "高回収": {"max_points": 8, "wide_limit": 0, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 1, "win_weight": .24, "min_wide_odds": 99.0, "target_hit": 24},
         # Backwards-compatible aliases for older drafts/tests.
-        "的中30%型": {"max_points": 8, "wide_limit": 2, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 0, "win_weight": .36, "min_wide_odds": 2.8, "target_hit": 32},
-        "標準": {"max_points": 8, "wide_limit": 2, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 0, "win_weight": .36, "min_wide_odds": 2.8, "target_hit": 32},
-        "回収重視": {"max_points": 9, "wide_limit": 1, "quinella_limit": 4, "triple_limit": 4, "trifecta_limit": 1, "win_weight": .28, "min_wide_odds": 3.2, "target_hit": 28},
+        "的中30%型": {"max_points": 7, "wide_limit": 3, "quinella_limit": 3, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.6, "target_hit": 32},
+        "標準": {"max_points": 7, "wide_limit": 3, "quinella_limit": 3, "triple_limit": 1, "trifecta_limit": 0, "win_weight": .34, "min_wide_odds": 2.6, "target_hit": 32},
+        "回収重視": {"max_points": 8, "wide_limit": 1, "quinella_limit": 4, "triple_limit": 2, "trifecta_limit": 1, "win_weight": .28, "min_wide_odds": 3.2, "target_hit": 28},
     }
     setting = style_settings.get(style, style_settings["標準"])
     if not allow_torigami:
@@ -2168,11 +2168,13 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
 
     add("単勝", [anchor], setting["win_weight"] if popular_anchor else setting["win_weight"] * .82, "単勝は勝ち切り確認用の補助として薄く持つ", "補助")
     if style == "複圏" and longshot_anchor:
-        add("複勝", [anchor], .82, "中穴〜大穴軸の3着以内想定を直接拾う", "メイン")
+        add("複勝", [anchor], 1.45, "中穴〜大穴軸の3着以内想定を直接拾う", "メイン")
     for idx, opponent in enumerate(opponents[:int(setting["quinella_limit"])]):
-        add("馬連", [anchor, opponent], 1.34 - idx * .10, "軸馬の2着以内を想定する主戦買い目", "メイン")
+        quinella_weight = 1.42 - idx * .10 if style == "勝ち切り" else .98 - idx * .08 if style == "連軸" else .76 - idx * .08 if style == "複圏" else 1.22 - idx * .09
+        add("馬連", [anchor, opponent], quinella_weight, "軸馬の2着以内を想定する主戦買い目", "メイン")
     for idx, opponent in enumerate(opponents[:int(setting["wide_limit"])]):
-        add("ワイド", [anchor, opponent], 1.08 - idx * .08 if style == "複圏" else .92 - idx * .08, "軸が3着以内に残る場合の主戦または保険", "メイン" if style == "複圏" else "保険")
+        wide_weight = 1.30 - idx * .09 if style == "複圏" else 1.18 - idx * .08 if style == "連軸" else .82 - idx * .08
+        add("ワイド", [anchor, opponent], wide_weight, "軸が3着以内に残る場合の主戦または保険", "メイン" if style in {"複圏", "連軸"} else "保険")
     triple_limit = int(setting["triple_limit"])
     if triple_limit and len(opponents) >= 2:
         triple_pairs = []
@@ -2184,11 +2186,11 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
                 for right in secondary[left_i + 1:]:
                     triple_pairs.append((left, right))
         for left, right in triple_pairs[:triple_limit]:
-            add("3連複", [anchor, left, right], .72 if style != "高回収" else .94, "軸が3着以内に残る場合の配当上積み", "上積み")
+            add("3連複", [anchor, left, right], .38 if style in {"連軸", "複圏"} else .52 if style == "勝ち切り" else .74, "軸が3着以内に残る場合の配当上積み", "上積み")
     trifecta_limit = int(setting.get("trifecta_limit", 0))
     if trifecta_limit and len(opponents) >= 2:
         for left, right in list(permutations(opponents[:3], 2))[:trifecta_limit]:
-            add("3連単", [anchor, left, right], .58 if style == "勝ち切り" else .72, "勝ち切り想定が強い時だけ1着固定で小さく上積み", "上積み")
+            add("3連単", [anchor, left, right], .42 if style == "勝ち切り" else .58, "勝ち切り想定が強い時だけ1着固定で小さく上積み", "上積み")
 
     max_points = min(max(1, budget // unit), int(setting["max_points"]))
     role_order = ["メイン", "上積み", "保険", "補助"]
@@ -2199,7 +2201,7 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
     selected: list[dict] = []
     role_targets = {
         "メイン": min(len(by_role["メイン"]), max(2, max_points // 2 + (1 if style in {"連軸", "複圏"} else 0))),
-        "上積み": min(len(by_role["上積み"]), max(1, max_points // 3)),
+        "上積み": min(len(by_role["上積み"]), 1 if style in {"連軸", "複圏"} else max(1, max_points // 4)),
         "保険": min(len(by_role["保険"]), 1 if style in {"高回収", "回収重視"} else 2),
         "補助": min(len(by_role["補助"]), 1),
     }
@@ -2214,10 +2216,10 @@ def build_anchor_set_plan(rows: list[dict], marks: dict, budget: int, unit: int,
         return [], skipped
     usable = (budget // unit) * unit
     role_share = {
-        "メイン": .72 if style in {"連軸", "複圏"} else .68 if style == "勝ち切り" else .56,
-        "上積み": .20 if style in {"勝ち切り", "連軸"} else .18 if style == "複圏" else .34,
+        "メイン": .82 if style in {"連軸", "複圏"} else .74 if style == "勝ち切り" else .66,
+        "上積み": .10 if style in {"連軸", "複圏"} else .16 if style == "勝ち切り" else .26,
         "保険": .06 if style != "高回収" else .02,
-        "補助": .02 if style in {"連軸", "複圏"} else .04,
+        "補助": .08 if style == "勝ち切り" else .04,
     }
     role_buckets: dict[str, list[dict]] = {}
     for item in selected:

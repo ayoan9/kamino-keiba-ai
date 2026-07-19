@@ -37,9 +37,14 @@ def test_ai_bet_plans_choose_points_and_ticket_types_without_user_limit():
         assert all(bet["推奨購入金額"] % 100 == 0 for bet in plan["bets"])
         assert all("的中期待度" in bet and "回収期待指数" in bet for bet in plan["bets"])
     assert any(bet["券種"] == "馬連" for bet in plans["連軸型"]["bets"])
+    assert any(bet["券種"] == "ワイド" for bet in plans["連軸型"]["bets"])
     assert any(bet["券種"] == "ワイド" for bet in plans["複圏型"]["bets"])
     assert len(plans["連軸型"]["bets"]) <= 8
     assert any(bet["券種"] in {"3連複", "3連単"} for bet in plans["高回収狙い"]["bets"])
+    for name in ["連軸型", "複圏型"]:
+        triple_stake = sum(bet["推奨購入金額"] for bet in plans[name]["bets"] if bet["券種"] in {"3連複", "3連単"})
+        total_stake = sum(bet["推奨購入金額"] for bet in plans[name]["bets"])
+        assert triple_stake <= total_stake * 0.25
 
 
 def test_place_bet_is_considered_for_longshot_show_anchor():
