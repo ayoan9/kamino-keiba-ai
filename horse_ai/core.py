@@ -223,6 +223,7 @@ def new_state() -> dict[str, Any]:
         "raw_inputs": {k: "" for k in ["レース情報", "出馬表", "過去走情報", "コメント", "任意メモ"]},
         "horses": [], "ai_scores": {}, "final_scores": {}, "ai_comments": {}, "risk_comments": {},
         "evaluation_source": "",
+        "web_reference_urls": [], "web_reference_text": "", "web_sources": [], "web_evidence": [],
         "score_results": [], "marks": {}, "weights": {k: 1.0 for k in SCORE_KEYS},
         "selected_preset": "標準", "score_mix": PRESET_SCORE_MIX["標準"],
         "bets": [], "bet_plans": {}, "selected_bet_plan": "AIおすすめ", "skipped_bets": [], "odds_history": [], "alerts": [],
@@ -231,6 +232,175 @@ def new_state() -> dict[str, Any]:
         "result_feedback": {}, "trend_analysis": {}, "web_history": {},
         "summary": {"レース総評": "", "展開予想": "", "有利脚質": "", "波乱度": "中", "買い判断": "", "注意点": "オッズは変動します。払戻・利益は目安です。"},
     }
+
+
+def _safe_public_url(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(url).strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not host:
+        return False
+    blocked_exact = {"localhost", "0.0.0.0", "::1"}
+    blocked_prefix = ("127.", "10.", "192.168.", "169.254.")
+    if host in blocked_exact or host.startswith(blocked_prefix):
+        return False
+    if re.match(r"^172\.(1[6-9]|2\d|3[0-1])\.", host):
+        return False
+    return True
+
+
+def fetch_public_web_sources(urls: list[str], timeout: int = 8) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fetch public webpages and extract plain text for horse evidence analysis.
+
+    This intentionally does not crawl, log in, or bypass access controls.  The
+    caller supplies specific public URLs, and the text is capped so the app stays
+    light on Render.
+    """
+    import requests
+    from bs4 import BeautifulSoup
+
+    sources: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    headers = {"User-Agent": "KaminoKeibaAI/1.0 (+public-url-evidence)"}
+    for raw_url in [u.strip() for u in urls if str(u).strip()][:5]:
+        if not _safe_public_url(raw_url):
+            warnings.append(f"{raw_url}: 公開URLとして扱えないためスキップしました")
+            continue
+        try:
+            response = requests.get(raw_url, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if "text/html" not in content_type and "text/plain" not in content_type and content_type:
+                warnings.append(f"{raw_url}: HTML/テキストではないためスキップしました")
+                continue
+            soup = BeautifulSoup(response.text, "html.parser")
+            for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
+                tag.decompose()
+            title = soup.title.get_text(" ", strip=True) if soup.title else raw_url
+            text = soup.get_text("\n", strip=True)
+            text = unicodedata.normalize("NFKC", text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            sources.append({"title": title[:120], "url": raw_url, "text": text[:45000], "fetched_at": datetime.now().isoformat(timespec="seconds")})
+        except Exception as exc:
+            warnings.append(f"{raw_url}: 取得できませんでした（{exc}）")
+    return sources, warnings
+
+
+def _snippet_windows(text: str, name: str, window: int = 180) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", text or "")
+    normalized_name = unicodedata.normalize("NFKC", name or "").strip()
+    if not normalized or not normalized_name:
+        return []
+    snippets: list[str] = []
+    for match in re.finditer(re.escape(normalized_name), normalized):
+        start = max(0, match.start() - window)
+        end = min(len(normalized), match.end() + window)
+        snippet = normalized[start:end]
+        snippet = re.sub(r"\s+", " ", snippet).strip(" \n\t。")
+        if snippet and snippet not in snippets:
+            snippets.append(snippet)
+        if len(snippets) >= 4:
+            break
+    return snippets
+
+
+def _classify_web_snippet(snippet: str, race_info: dict | None = None) -> tuple[str, str, float, str]:
+    race_info = race_info or {}
+    text = unicodedata.normalize("NFKC", snippet or "")
+    course = str(race_info.get("競馬場", ""))
+    distance = str(race_info.get("距離", ""))
+    surface = str(race_info.get("芝/ダート", ""))
+    track = str(race_info.get("馬場", ""))
+    signals: list[tuple[str, str, float, str]] = []
+    if re.search(r"(前半|ラップ|ハイペース|Hペース|スロー|Sペース|淀み|流れ|逃げ|先行|番手|差し|追込|残|粘)", text):
+        delta = .65 if re.search(r"(ハイペース|Hペース|残|粘|番手|先行)", text) else .45
+        signals.append(("展開利", "ペース・位置取り材料", delta, "今回の流れへの対応力を確認"))
+    if course and course in text or (distance and distance in text) or re.search(r"(同舞台|同条件|コース|距離|右回り|左回り|坂|小回り|外回り|内回り|持ち時計|時計)", text):
+        signals.append(("距離・コース適性", "コース・距離材料", .55, "今回条件との接点を確認"))
+    if surface and surface in text or track and track in text or re.search(r"(良馬場|稍重|重馬場|不良|道悪|高速馬場|時計勝負|荒れ馬場|渋)", text):
+        signals.append(("馬場適性", "馬場材料", .45, "馬場や時計への対応を確認"))
+    if re.search(r"(近走|前走|前々走|着|勝|敗|上がり|伸び|内容|不利|出遅れ|巻き返し)", text):
+        signals.append(("近走評価", "近走内容", .45, "直近内容を評価材料に追加"))
+    if re.search(r"(状態|気配|調教|追い切り|仕上|陣営|コメント|調教師|騎手|具合|順調|上積み)", text):
+        signals.append(("厩舎・ローテ評価", "陣営・状態コメント", .45, "状態面の根拠を確認"))
+    if re.search(r"(人気薄|穴|妙味|オッズ|配当|過小評価|盲点|面白い)", text):
+        signals.append(("妙味", "妙味材料", .35, "市場評価とのズレを確認"))
+    if re.search(r"(不安|課題|割引|苦手|掛か|折り合|凡走|大敗|疲れ|反動|重い)", text):
+        return ("本命適性", "リスク材料", -.55, "信頼度を慎重に見る")
+    if not signals:
+        return ("近走評価", "一般材料", .25, "馬名周辺の公開情報を確認")
+    preferred = sorted(signals, key=lambda item: abs(item[2]), reverse=True)[0]
+    if "必至" in text or "高評価" in text or "有力" in text or "好相性" in text:
+        preferred = (preferred[0], preferred[1], min(.8, preferred[2] + .15), preferred[3])
+    if "不利" in text and preferred[0] == "近走評価":
+        preferred = (preferred[0], preferred[1], min(.7, preferred[2] + .15), "前走の敗因を補正材料として確認")
+    return preferred
+
+
+def extract_web_evidence_for_horses(horses: list[dict], sources: list[dict], race_info: dict | None = None) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for horse in horses:
+        no = str(horse.get("馬番", "")).strip()
+        name = str(horse.get("馬名", "")).strip()
+        if not name:
+            continue
+        for source in sources:
+            for snippet in _snippet_windows(str(source.get("text", "")), name):
+                target, kind, delta, rationale = _classify_web_snippet(snippet, race_info)
+                evidence.append({
+                    "採用": True,
+                    "馬番": no,
+                    "馬名": name,
+                    "種別": kind,
+                    "評価項目": target,
+                    "補正": delta,
+                    "根拠": snippet[:260],
+                    "見立て": rationale,
+                    "ソース": source.get("title") or source.get("url") or "貼り付け本文",
+                    "URL": source.get("url", ""),
+                    "ユーザー指摘": "",
+                })
+                if len([e for e in evidence if e["馬番"] == no]) >= 3:
+                    break
+            if len([e for e in evidence if e["馬番"] == no]) >= 3:
+                break
+    return evidence
+
+
+def apply_web_evidence_to_scores(final_scores: dict, evidence: list[dict]) -> tuple[dict, dict[str, str], dict[str, str]]:
+    updated = deepcopy(final_scores)
+    comments: dict[str, list[str]] = {}
+    risks: dict[str, list[str]] = {}
+    totals: dict[str, dict[str, float]] = {}
+    for item in evidence or []:
+        if not item.get("採用", True):
+            continue
+        no = str(item.get("馬番", "")).strip()
+        key = str(item.get("評価項目", ""))
+        if no not in updated or key not in SCORE_KEYS:
+            continue
+        delta = max(-1.0, min(1.0, _float(item.get("補正"), 0)))
+        totals.setdefault(no, {}).setdefault(key, 0.0)
+        totals[no][key] += delta
+        snippet = str(item.get("根拠", "")).strip()
+        source = str(item.get("ソース", "")).strip()
+        line = f"{item.get('種別','Web材料')}：{snippet}"
+        if source:
+            line += f"（{source}）"
+        if delta < 0:
+            risks.setdefault(no, []).append(line)
+        else:
+            comments.setdefault(no, []).append(line)
+    for no, by_key in totals.items():
+        for key, raw_delta in by_key.items():
+            bounded = max(-1.0, min(1.0, raw_delta))
+            current = int(updated[no].get(key, 3))
+            if abs(bounded) >= .35:
+                updated[no][key] = max(1, min(5, current + (1 if bounded > 0 else -1)))
+    compact_comments = {no: "\n".join(f"- {line}" for line in lines[:3]) for no, lines in comments.items()}
+    compact_risks = {no: "\n".join(f"- {line}" for line in lines[:3]) for no, lines in risks.items()}
+    return updated, compact_comments, compact_risks
 
 
 def _find(pattern: str, text: str) -> str:

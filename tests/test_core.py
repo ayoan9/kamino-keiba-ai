@@ -1,4 +1,4 @@
-from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, PRESET_SCORE_MIX, PRESETS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_odds_calibration, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, parse_single_odds_text, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_prediction_profile, update_betting_journal_entry
+from horse_ai.core import BASE_WEIGHTS, HORSE_COLUMNS, PRESET_SCORE_MIX, PRESETS, SCORE_KEYS, _evaluation_prompt, _prepare_visual_inputs, add_betting_journal_entries, add_betting_journal_entry, analyze_race_trends, apply_web_evidence_to_scores, archive_prediction, betting_journal_entries, calculate_scores, compare_odds, extract_web_evidence_for_horses, fetch_netkeiba_popular_odds, generate_marks, heuristic_evaluations, infer_running_style, learn_from_race_result, learn_from_result_history, learn_odds_calibration, learn_prediction_adjustments, list_predictions, load_layout_profiles, load_prediction_profile, merge_web_history, optimize_bets, parse_betting_history_text, parse_finish_order, parse_odds, parse_popular_odds_snapshot, parse_single_odds_text, prediction_policy_prompt, propose_bet_plans, save_layout_profile, save_prediction_profile, update_betting_journal_entry
 from horse_ai.historical import _available_month_tokens, _day_races, _result_detail, aggregate_history
 from horse_ai.jra_fetcher import _anchor_actions, _race_identity, _single_odds, _tables
 
@@ -39,6 +39,32 @@ def test_prediction_style_changes_total_scores():
         {key: PRESETS["穴狙い"].get(key, 1.0) for key in SCORE_KEYS} | {"__score_mix": PRESET_SCORE_MIX["穴狙い"]},
     )
     assert [row["総合スコア"] for row in standard] != [row["総合スコア"] for row in value_style]
+
+
+def test_web_evidence_is_extracted_and_can_adjust_scores():
+    horses = [{"馬番": 7, "馬名": "テストホース"}]
+    sources = [{
+        "title": "公開コメント",
+        "url": "https://example.com/race",
+        "text": "テストホースは前走ハイペースを2番手で先行して最後まで粘った。小倉芝1800の同舞台でも好時計があり状態も順調。",
+    }]
+    evidence = extract_web_evidence_for_horses(horses, sources, {"競馬場": "小倉", "芝/ダート": "芝", "距離": "1800"})
+    assert evidence
+    assert evidence[0]["馬番"] == "7"
+    assert evidence[0]["評価項目"] in SCORE_KEYS
+    scores = {"7": {key: 3 for key in SCORE_KEYS}}
+    updated, comments, risks = apply_web_evidence_to_scores(scores, evidence)
+    assert any(updated["7"][key] > 3 for key in SCORE_KEYS)
+    assert "7" in comments
+    assert "7" not in risks
+
+
+def test_web_evidence_rejection_prevents_score_adjustment():
+    scores = {"1": {key: 3 for key in SCORE_KEYS}}
+    evidence = [{"採用": False, "馬番": "1", "評価項目": "展開利", "補正": 1.0, "根拠": "ハイペースを粘った"}]
+    updated, comments, _ = apply_web_evidence_to_scores(scores, evidence)
+    assert updated == scores
+    assert comments == {}
 
 
 def test_ai_bet_plans_choose_points_and_ticket_types_without_user_limit():

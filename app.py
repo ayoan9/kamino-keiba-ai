@@ -24,6 +24,7 @@ from horse_ai.core import (
     compare_odds, evaluate_with_ollama,
     extract_screenshot_with_macos_vision, extract_netkeiba_race_table_image_with_tesseract,
     extract_netkeiba_newspaper_pdf, generate_marks, align_marks_to_bets,
+    apply_web_evidence_to_scores, extract_web_evidence_for_horses, fetch_public_web_sources,
     heuristic_evaluations, learn_from_race_result, learn_from_result_history, learn_prediction_adjustments, list_predictions,
     cloud_storage_enabled, cloud_storage_status, data_path, load_cloud_json, load_json, load_prediction_profile, new_state, ocr_popular_odds_image_with_tesseract, ocr_text_with_macos_vision, parse_inputs,
     fetch_netkeiba_popular_odds, merge_web_history, parse_finish_order, parse_odds, parse_popular_odds_snapshot, prediction_policy_prompt, save_json,
@@ -980,6 +981,90 @@ def step2():
     section_label("8項目評価")
     edited = st.data_editor(pd.DataFrame(rows, columns=["馬番", "馬名", *SCORE_KEYS]), hide_index=True, width="stretch", disabled=["馬番", "馬名"], key="score_editor_8items_v1",
         column_config={k: st.column_config.NumberColumn(k, min_value=1, max_value=5, step=1) for k in SCORE_KEYS})
+    with st.expander("Web材料で評価根拠を補強（任意）", expanded=False):
+        st.caption("公開URLや記事本文を材料に、馬名の周辺文を拾って評価項目へ仮反映します。ログインが必要なページや有料領域の自動取得は対象外です。")
+        url_text = st.text_area(
+            "参照URL（1行に1URL・最大5件）",
+            value="\n".join(race.get("web_reference_urls", [])),
+            placeholder="例）https://race.netkeiba.com/...",
+            height=92,
+            key="web_reference_urls_input",
+        )
+        pasted_text = st.text_area(
+            "記事・陣営コメント・戦歴メモを貼り付け（任意）",
+            value=race.get("web_reference_text", ""),
+            placeholder="馬名が含まれる本文を貼ると、その馬の根拠候補として抽出します。",
+            height=120,
+            key="web_reference_text_input",
+        )
+        analyze_web_cols = st.columns([1, 2])
+        with analyze_web_cols[0]:
+            if st.button("Web材料を解析", icon=":material/travel_explore:", width="stretch"):
+                urls = [u.strip() for u in url_text.splitlines() if u.strip()]
+                progress = st.progress(0, text="Web材料を確認しています（0%）")
+                progress_step(progress, 20, "参照URLを読み込んでいます")
+                sources, web_warnings = fetch_public_web_sources(urls)
+                if pasted_text.strip():
+                    sources.append({
+                        "title": "貼り付け本文",
+                        "url": "",
+                        "text": pasted_text,
+                        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                    })
+                progress_step(progress, 62, "馬名ごとの根拠候補を抽出しています")
+                evidence = extract_web_evidence_for_horses(race["horses"], sources, race["race_info"])
+                race["web_reference_urls"] = urls
+                race["web_reference_text"] = pasted_text
+                race["web_sources"] = [{k: v for k, v in s.items() if k != "text"} for s in sources]
+                race["web_evidence"] = evidence
+                persist("Web材料を保存しました")
+                progress_step(progress, 100, "Web材料の解析完了")
+                for warning in web_warnings:
+                    st.warning(warning)
+                if evidence:
+                    st.success(f"{len(evidence)}件の根拠候補を抽出しました。内容を確認してから評価へ反映してください。")
+                else:
+                    st.warning("馬名に紐づく根拠候補を抽出できませんでした。本文に馬名が含まれているか確認してください。")
+        with analyze_web_cols[1]:
+            st.markdown('<div class="guide">例：「前走ハイペースを先行して粘った」「同舞台で好時計」「追い切り良化」などを拾い、展開利・条件適性・近走・状態面へ薄く反映します。</div>', unsafe_allow_html=True)
+        evidence_rows = race.get("web_evidence", [])
+        if evidence_rows:
+            st.markdown("**根拠候補の確認・修正**")
+            st.caption("間違っている根拠は「採用」を外すか、根拠・評価項目・補正・ユーザー指摘を修正してください。補正は-1.0〜+1.0の範囲で、評価点には最大1段階だけ反映します。")
+            evidence_df = pd.DataFrame(evidence_rows)
+            display_cols = ["採用", "馬番", "馬名", "種別", "評価項目", "補正", "根拠", "見立て", "ソース", "URL", "ユーザー指摘"]
+            for col in display_cols:
+                if col not in evidence_df.columns:
+                    evidence_df[col] = "" if col != "採用" else True
+            edited_evidence = st.data_editor(
+                evidence_df[display_cols],
+                hide_index=True,
+                width="stretch",
+                key="web_evidence_editor_v1",
+                disabled=["馬番", "馬名", "ソース", "URL"],
+                column_config={
+                    "採用": st.column_config.CheckboxColumn("採用"),
+                    "評価項目": st.column_config.SelectboxColumn("評価項目", options=SCORE_KEYS),
+                    "補正": st.column_config.NumberColumn("補正", min_value=-1.0, max_value=1.0, step=0.05, format="%.2f"),
+                    "根拠": st.column_config.TextColumn("根拠", width="large"),
+                    "ユーザー指摘": st.column_config.TextColumn("ユーザー指摘", width="medium"),
+                },
+            )
+            if st.button("採用したWeb材料を評価に反映", type="primary", icon=":material/check_circle:"):
+                records = edited_evidence.to_dict("records")
+                race["web_evidence"] = records
+                updated_scores, web_comments, web_risks = apply_web_evidence_to_scores(race["final_scores"], records)
+                race["final_scores"] = updated_scores
+                for no, comment in web_comments.items():
+                    prefix = race["ai_comments"].get(no, "")
+                    race["ai_comments"][no] = (prefix + "\n\nWeb根拠:\n" + comment).strip()
+                for no, risk in web_risks.items():
+                    prefix = race["risk_comments"].get(no, "")
+                    race["risk_comments"][no] = (prefix + "\n\nWebで確認したリスク:\n" + risk).strip()
+                race["evaluation_source"] = f'{race.get("evaluation_source") or "ローカル仮評価"}＋Web根拠'
+                persist("Web根拠を評価へ反映しました")
+                st.success("採用したWeb材料を評価へ反映しました。必要なら8項目評価をさらに手修正してください。")
+                st.rerun()
     section_label("評価根拠")
     selected_no = st.selectbox("馬を選択", list(race["final_scores"].keys()), format_func=lambda n: f"{n}番 {by_no.get(n,{}).get('馬名','')}")
     comment_col, risk_col = st.columns(2)
